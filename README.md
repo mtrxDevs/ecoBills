@@ -33,10 +33,12 @@ The API serves the built web UI itself when `SERVE_WEB=1`, so one long-running
 service (Render / Railway / Fly — not Vercel serverless, which can't run the
 Puppeteer PDF step) hosts everything:
 
-- Build command: `corepack enable && NODE_ENV=development pnpm install --frozen-lockfile && pnpm -r build`
+- Build command: `corepack enable && NODE_ENV=development pnpm install --frozen-lockfile && pnpm build`
   (`NODE_ENV=development` matters: Render defaults builds to production, and
   pnpm skips devDependencies then — but tsc, the Prisma CLI, and Vite *are*
-  devDependencies. Runtime still uses the service's own `NODE_ENV=production`.)
+  devDependencies. Runtime still uses the service's own `NODE_ENV=production`.
+  Root `pnpm build` regenerates the Prisma Client first, so the API always
+  compiles against fresh types.)
 - Start command: `pnpm --filter @ecobills/api start`
 - Env: `DATABASE_URL`, `DIRECT_URL`, `SESSION_SECRET`, `SERVE_WEB=1`,
   `NODE_ENV=production`, `APP_URL=https://<your-service>`, `RESEND_*`.
