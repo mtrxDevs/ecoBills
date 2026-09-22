@@ -35,12 +35,10 @@ export async function authRoutes(app: FastifyInstance) {
         role: 'owner',
       },
     })
-    const token = newSessionToken()
-    await prisma.session.create({
-      data: { userId: user.id, tokenHash: tokenHash(token), expiresAt: new Date(Date.now() + 30 * 86400e3) },
-    })
-    setSessionCookie(reply, token)
-    return { user: pub(user), business }
+    // No session yet: the inbox must be proven first. The wizard completes
+    // signup via POST /auth/verify-email.
+    const challengeToken = await issueChallenge(user.id, user.email, 'email_verify')
+    return { emailVerificationRequired: true, challengeToken }
   })
 
   app.post('/auth/login', { config: { rateLimit: STRICT_AUTH_LIMIT } }, async (req, reply) => {
@@ -49,9 +47,14 @@ export async function authRoutes(app: FastifyInstance) {
     const user = await prisma.user.findUnique({ where: { email: body.email } })
     if (!user || !(await verifyPassword(body.password, user.passwordHash)))
       return reply.code(401).send({ error: 'invalid_credentials' })
+    // Unverified inboxes prove themselves first — even before 2FA.
+    if (!user.emailVerified) {
+      const challengeToken = await issueChallenge(user.id, user.email, 'email_verify')
+      return { emailVerificationRequired: true, challengeToken }
+    }
     // No session yet when 2FA is on — the code step completes the login.
     if (user.twoFactorEnabled) {
-      const challengeToken = await issueChallenge(user.id, user.email)
+      const challengeToken = await issueChallenge(user.id, user.email, 'two_factor')
       return { twoFactorRequired: true, challengeToken }
     }
     await createSession(user.id, reply)
@@ -62,11 +65,28 @@ export async function authRoutes(app: FastifyInstance) {
   app.post('/auth/2fa/verify', { config: { rateLimit: STRICT_AUTH_LIMIT } }, async (req, reply) => {
     if (!dbReady) return reply.code(503).send({ error: 'database_unavailable' })
     const body = verify2faSchema.parse(req.body)
-    const user = await consumeChallenge(body.challengeToken, body.code, reply)
+    const user = await consumeChallenge(body.challengeToken, body.code, 'two_factor', reply)
     if (!user) return // consumeChallenge already replied
     await createSession(user.id, reply)
     await audit({ businessId: user.businessId, userId: user.id, action: '2fa.login', entity: 'User', entityId: user.id })
     return { user: pub(user) }
+  })
+
+  // Prove an inbox (signup, or a grandfathered login). Flips the flag, then
+  // either opens the session or chains into the 2FA step when that is on.
+  app.post('/auth/verify-email', { config: { rateLimit: STRICT_AUTH_LIMIT } }, async (req, reply) => {
+    if (!dbReady) return reply.code(503).send({ error: 'database_unavailable' })
+    const body = verify2faSchema.parse(req.body)
+    const user = await consumeChallenge(body.challengeToken, body.code, 'email_verify', reply)
+    if (!user) return
+    await prisma.user.update({ where: { id: user.id }, data: { emailVerified: true } })
+    await audit({ businessId: user.businessId, userId: user.id, action: 'email.verified', entity: 'User', entityId: user.id })
+    if (user.twoFactorEnabled) {
+      const challengeToken = await issueChallenge(user.id, user.email, 'two_factor')
+      return { twoFactorRequired: true, challengeToken }
+    }
+    await createSession(user.id, reply)
+    return { user: pub({ ...user, emailVerified: true }) }
   })
 
   // New code, new challenge; the old one dies with it.
@@ -82,8 +102,8 @@ export async function authRoutes(app: FastifyInstance) {
       where: { userId: ch.userId, consumedAt: null },
       data: { consumedAt: new Date() },
     })
-    const challengeToken = await issueChallenge(ch.userId, ch.user.email)
-    return { twoFactorRequired: true, challengeToken }
+    const challengeToken = await issueChallenge(ch.userId, ch.user.email, ch.purpose as 'two_factor' | 'email_verify')
+    return { challengeToken }
   })
 
   // --- self-service 2FA management (any authenticated user, own account only) ---
@@ -91,7 +111,7 @@ export async function authRoutes(app: FastifyInstance) {
   // Step 1: prove you can read the account's email.
   app.post('/auth/2fa/setup', { preHandler: requireAuth }, async (req) => {
     const me = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } })
-    const challengeToken = await issueChallenge(me.id, me.email)
+    const challengeToken = await issueChallenge(me.id, me.email, 'two_factor')
     return { challengeToken }
   })
 
@@ -101,7 +121,7 @@ export async function authRoutes(app: FastifyInstance) {
     const ch = await prisma.twoFactorChallenge.findUnique({
       where: { tokenHash: hashChallengeSecret(body.challengeToken) },
     })
-    if (!ch || ch.userId !== req.user!.id || !isChallengeUsable(ch)) {
+    if (!ch || ch.userId !== req.user!.id || ch.purpose !== 'two_factor' || !isChallengeUsable(ch)) {
       return reply.code(401).send({ error: 'invalid_challenge' })
     }
     if (!verifyChallengeCode(body.code, ch.codeHash)) {
@@ -163,33 +183,35 @@ export async function authRoutes(app: FastifyInstance) {
 }
 
 /** Create a challenge, email the code, return the (plaintext) challenge token. */
-async function issueChallenge(userId: string, email: string) {
+async function issueChallenge(userId: string, email: string, purpose: 'two_factor' | 'email_verify') {
   const code = generateNumericCode()
   const challengeToken = newSessionToken()
   await prisma.twoFactorChallenge.create({
     data: {
       userId,
+      purpose,
       codeHash: hashChallengeSecret(code),
       tokenHash: hashChallengeSecret(challengeToken),
       expiresAt: new Date(Date.now() + TWO_FA_CODE_TTL_MINUTES * 60e3),
     },
   })
-  const { subject, text } = render2faEmail(code)
+  const { subject, text } = render2faEmail(code, 'ecoBills', purpose === 'email_verify' ? 'verify' : 'signin')
   const r = await sendEmail({ to: email, subject, text })
   if (r.stub) console.log(`[2fa:stub] code for ${email}: ${code} (no RESEND_API_KEY — read it here in dev)`)
   return challengeToken
 }
 
 /**
- * Validate a login challenge. Returns the user on success, or replies with
- * the failure and returns null. Single-use, expiry- and attempt-capped.
+ * Validate a challenge of the expected purpose. Returns the user on success,
+ * or replies with the failure and returns null. Single-use, expiry- and
+ * attempt-capped. A token minted for one purpose never works for the other.
  */
-async function consumeChallenge(challengeToken: string, code: string, reply: any) {
+async function consumeChallenge(challengeToken: string, code: string, purpose: 'two_factor' | 'email_verify', reply: any) {
   const ch = await prisma.twoFactorChallenge.findUnique({
     where: { tokenHash: hashChallengeSecret(challengeToken) },
     include: { user: true },
   })
-  if (!ch || ch.consumedAt) {
+  if (!ch || ch.purpose !== purpose || ch.consumedAt) {
     reply.code(401).send({ error: 'invalid_challenge' })
     return null
   }
@@ -233,6 +255,6 @@ async function createSession(userId: string, reply: any) {
   setSessionCookie(reply, token)
 }
 
-function pub(u: { id: string; businessId?: string; name: string; email: string; role: string; twoFactorEnabled?: boolean }) {
-  return { id: u.id, businessId: (u as any).businessId, name: u.name, email: u.email, role: u.role, twoFactorEnabled: !!(u as any).twoFactorEnabled }
+function pub(u: { id: string; businessId?: string; name: string; email: string; role: string; twoFactorEnabled?: boolean; emailVerified?: boolean }) {
+  return { id: u.id, businessId: (u as any).businessId, name: u.name, email: u.email, role: u.role, twoFactorEnabled: !!(u as any).twoFactorEnabled, emailVerified: !!(u as any).emailVerified }
 }

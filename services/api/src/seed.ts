@@ -12,10 +12,10 @@ async function main() {
     data: { name: 'Demo Kirana Store', state: 'Maharashtra', gstin: '27ABCDE1234F1Z5', address: 'MG Road, Pune', invoicePrefix: 'INV' },
   })
   const owner = await prisma.user.create({
-    data: { businessId: biz.id, name: 'Demo Owner', email, passwordHash: await hashPassword('password123'), role: 'owner' },
+    data: { businessId: biz.id, name: 'Demo Owner', email, passwordHash: await hashPassword('password123'), role: 'owner', emailVerified: true },
   })
   await prisma.user.create({
-    data: { businessId: biz.id, name: 'Demo Staff', email: 'staff@demo.shop', passwordHash: await hashPassword('password123'), role: 'staff' },
+    data: { businessId: biz.id, name: 'Demo Staff', email: 'staff@demo.shop', passwordHash: await hashPassword('password123'), role: 'staff', emailVerified: true },
   })
   const sup = await prisma.supplier.create({ data: { businessId: biz.id, name: 'Sharma Distributors', contactEmail: 'orders@sharma.example', phone: '98200 12345' } })
   const cust = await prisma.customer.create({ data: { businessId: biz.id, name: 'Walk-in Regular', phone: '98200 00000', state: 'Maharashtra' } })

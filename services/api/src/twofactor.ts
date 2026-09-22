@@ -34,7 +34,17 @@ export function isChallengeUsable(c: ChallengeState, now = new Date()) {
   return true
 }
 
-export function render2faEmail(code: string, appName = 'ecoBills') {
+export function render2faEmail(code: string, appName = 'ecoBills', kind: 'signin' | 'verify' = 'signin') {
+  if (kind === 'verify') {
+    return {
+      subject: `Verify your ${appName} email`,
+      text: [
+        `Your ${appName} verification code is: ${code}`,
+        '',
+        `It expires in ${TWO_FA_CODE_TTL_MINUTES} minutes. If you didn't create this account, ignore this email.`,
+      ].join('\n'),
+    }
+  }
   return {
     subject: `Your ${appName} sign-in code`,
     text: [

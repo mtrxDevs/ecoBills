@@ -238,16 +238,23 @@ export function Start() {
   const [items, setItems] = useState([{ name: '', sku: '', salePrice: '' }])
   const [err, setErr] = useState('')
   const [pending, setPending] = useState(false)
+  // Email verification gates step 2: signup mints an unverified account and
+  // returns a challenge — the session (needed to save items) only exists
+  // after POST /auth/verify-email succeeds.
+  const [verifyToken, setVerifyToken] = useState<string | null>(null)
+  const [code, setCode] = useState('')
+  const [codeErr, setCodeErr] = useState('')
+  const [resent, setResent] = useState(false)
   const nav = useNavigate()
   const { setMe } = useMe()
   const reduce = useReducedMotion()
   const stepTransition = pageTransition(reduce)
 
-  async function finish(skipItems = false) {
+  async function signup() {
     setErr('')
     setPending(true)
     try {
-      await api.post('/auth/signup', {
+      const res = await api.post('/auth/signup', {
         businessName: f.businessName,
         state: f.state,
         gstin: f.gstin || null,
@@ -255,8 +262,62 @@ export function Start() {
         email: f.email,
         password: f.password,
       })
-      const me = await api.get('/auth/me')
-      setMe(me)
+      if (res?.emailVerificationRequired) {
+        setVerifyToken(res.challengeToken)
+        setCode('')
+        setCodeErr('')
+        setResent(false)
+      } else {
+        // Defensive: current API always challenges; if that changes, continue.
+        setMe(await api.get('/auth/me'))
+        setStep(2)
+      }
+    } catch {
+      setErr('Could not create account. Is the email already used?')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function verifyCode(codeValue: string) {
+    if (!verifyToken || codeValue.length !== 6 || pending) return
+    setCodeErr('')
+    setPending(true)
+    try {
+      await api.post('/auth/verify-email', { challengeToken: verifyToken, code: codeValue })
+      setMe(await api.get('/auth/me'))
+      setVerifyToken(null)
+      setStep(2)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : ''
+      if (msg.includes('challenge_expired')) setCodeErr('That code expired. Request a new one below.')
+      else if (msg.includes('challenge_locked')) setCodeErr('Too many wrong tries. Request a new code to try again.')
+      else setCodeErr('Wrong code. Check the email and try again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function resendCode() {
+    if (!verifyToken || pending) return
+    setPending(true)
+    try {
+      const res = await api.post('/auth/2fa/resend', { challengeToken: verifyToken })
+      setVerifyToken(res.challengeToken)
+      setCode('')
+      setCodeErr('')
+      setResent(true)
+    } catch {
+      setCodeErr('That attempt expired. Go back and create the account again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function finish(skipItems = false) {
+    setErr('')
+    setPending(true)
+    try {
       if (!skipItems) {
         for (const it of items.filter((i) => i.name && i.sku)) {
           await api.post('/items', {
@@ -268,7 +329,7 @@ export function Start() {
       }
       nav('/')
     } catch {
-      setErr('Could not create account. Is the email already used?')
+      setErr('Could not save your items. You can add them later from Inventory.')
     } finally {
       setPending(false)
     }
@@ -329,7 +390,7 @@ export function Start() {
           </div>
         ) : null}
 
-        {step === 1 ? (
+        {step === 1 && !verifyToken ? (
           <div className="flex flex-col gap-4">
             <TextField label="Your name" required value={f.ownerName} onValueChange={(v) => setF({ ...f, ownerName: v })} validate={(v) => (v.trim() ? undefined : 'Enter your name.')} />
             <TextField
@@ -349,14 +410,66 @@ export function Start() {
               onValueChange={(v) => setF({ ...f, password: v })}
               validate={(v) => (v.length >= 8 ? undefined : 'Use at least 8 characters.')}
             />
+            <FormError message={err} />
+            <FormError message={err} />
             <div className="flex gap-2">
               <Button variant="ghost" onClick={() => setStep(0)}>
                 Back
               </Button>
-              <Button className="flex-1" disabled={!f.ownerName || !f.email || f.password.length < 8} onClick={() => setStep(2)}>
+              <Button
+                className="flex-1"
+                loading={pending}
+                loadingLabel="Creating account"
+                disabled={!f.ownerName || !f.email || f.password.length < 8}
+                onClick={signup}
+              >
                 Continue
               </Button>
             </div>
+          </div>
+        ) : null}
+
+        {verifyToken ? (
+          <div className="flex flex-col gap-4">
+            <p className="text-sm text-[var(--color-ink-muted)]">
+              Almost done — enter the 6-digit code sent to <b>{f.email}</b> to prove this inbox is yours.
+            </p>
+            <TextField
+              label="6-digit code"
+              inputProps={{ inputMode: 'numeric', autoComplete: 'one-time-code', maxLength: 6, autoFocus: true, placeholder: '••••••' }}
+              value={code}
+              onValueChange={(v) => {
+                const digits = v.replace(/\D/g, '').slice(0, 6)
+                setCode(digits)
+                if (digits.length === 6) void verifyCode(digits)
+              }}
+              validate={(v) => (v.length === 6 ? undefined : 'Enter all 6 digits.')}
+            />
+            <FormError message={codeErr} />
+            <Button loading={pending} loadingLabel="Verifying" disabled={code.length !== 6} onClick={() => verifyCode(code)}>
+              Verify email
+            </Button>
+            <div className="flex items-center justify-between text-sm">
+              <button
+                type="button"
+                className={`rounded-[var(--radius-sm)] font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
+                onClick={resendCode}
+              >
+                Send a new code
+              </button>
+              <button
+                type="button"
+                className={`rounded-[var(--radius-sm)] text-[var(--color-ink-muted)] underline underline-offset-2 hover:no-underline ${focusRing}`}
+                onClick={() => {
+                  setVerifyToken(null)
+                  setCode('')
+                  setCodeErr('')
+                }}
+              >
+                Change details
+              </button>
+            </div>
+            {resent ? <p className="text-sm text-[var(--color-ink-muted)]">A new code is on its way.</p> : null}
           </div>
         ) : null}
 

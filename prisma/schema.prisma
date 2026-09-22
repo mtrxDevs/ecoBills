@@ -85,6 +85,9 @@ model User {
   passwordHash String
   role         Role     @default(staff)
   twoFactorEnabled Boolean @default(false)
+  // False until the address is proven via an email_verify challenge. Accounts
+  // created before verification existed are grandfathered by the seed (true).
+  emailVerified Boolean @default(false)
   createdAt    DateTime @default(now())
 
   sessions     Session[]
@@ -107,10 +110,16 @@ model Session {
 // Email 2FA: a short-lived 6-digit code challenge. The code is stored hashed,
 // single-use (consumedAt), capped at MAX_ATTEMPTS guesses, and expires after
 // CODE_TTL_MINUTES. No session exists until verification succeeds.
+// `purpose` keeps signup-verification codes and sign-in codes from cross-use.
+enum ChallengePurpose {
+  two_factor
+  email_verify
+}
 model TwoFactorChallenge {
   id         String    @id @default(cuid())
   userId     String
   user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose    ChallengePurpose @default(two_factor)
   codeHash   String
   tokenHash  String    @unique
   expiresAt  DateTime
