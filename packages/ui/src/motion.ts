@@ -50,17 +50,17 @@ export function useReducedMotion(): boolean {
 }
 
 /**
- * `motionSafe()` — the gate every animated element goes through.
+ * `useMotionSafe()` — the gate every animated element goes through.
  *
  * Returns a function that passes Framer Motion props through unchanged, or
  * strips every transform-bearing key when the user asked for reduced motion.
  * Opacity and colour crossfades survive, so the interface still feels alive
  * without moving.
  *
- *   const safe = motionSafe()
+ *   const safe = useMotionSafe()
  *   <motion.div {...safe({ initial: { opacity: 0, y: 8 }, animate: { opacity: 1, y: 0 } })} />
  */
-export function motionSafe(): <P extends MotionProps>(props: P) => P {
+export function useMotionSafe(): <P extends MotionProps>(props: P) => P {
   const reduce = useReducedMotion()
   return useCallback(
     <P extends MotionProps>(props: P): P => (reduce ? stripTransformMotion(props as Record<string, unknown>) as P : props),

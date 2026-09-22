@@ -28,7 +28,7 @@ export type { Bezier, DurationName, EaseName, SpringName } from './motion-tokens
 export {
   useReducedMotion,
   prefersReducedMotion,
-  motionSafe,
+  useMotionSafe,
   fadeIn,
   pageTransition,
   cardLift,

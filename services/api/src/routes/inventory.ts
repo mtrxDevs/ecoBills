@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { prisma } from '../db.js'
 import { requireAuth, requirePerm } from '../auth.js'
 import { audit } from '../audit.js'
-import { customerSchema, supplierSchema, itemSchema, stockAdjustSchema } from '@ecobills/types'
+import { supplierSchema, itemSchema, stockAdjustSchema } from '@ecobills/types'
 
 function scope(req: any) {
   return { businessId: req.user!.businessId }

@@ -45,8 +45,8 @@ export {
   /* Hooks and variant builders */
   useReducedMotion,
   prefersReducedMotion,
-  /** `const safe = motionSafe()` then `{...safe({ whileHover: { y: -3 } })}`. */
-  motionSafe,
+  /** `const safe = useMotionSafe()` then `{...safe({ whileHover: { y: -3 } })}`. */
+  useMotionSafe,
   /** Pure opacity cross-fade. */
   fadeIn,
   /** The page cross-fade, reduced-motion aware. */

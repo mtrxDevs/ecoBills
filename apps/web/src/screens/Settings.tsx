@@ -32,7 +32,7 @@ import { useMe } from '../lib/store'
 export function Settings() {
   const qc = useQueryClient()
   const toast = useToast()
-  const { me, setMe } = useMe()
+  const { me } = useMe()
   const isOwner = me?.user?.role === 'owner'
 
   const { data: biz, isLoading, isError, error, refetch } = useQuery({

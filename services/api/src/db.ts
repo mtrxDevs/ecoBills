@@ -10,7 +10,7 @@ export async function connectDb(retries = 10) {
       dbReady = true
       console.log('[api] postgres connected')
       return true
-    } catch (e) {
+    } catch {
       console.warn(`[api] db not ready (${i + 1}/${retries}) — retrying in 2s`)
       await new Promise((r) => setTimeout(r, 2000))
     }

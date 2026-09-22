@@ -54,7 +54,7 @@ function Guard({ children }: { children: JSX.Element }) {
   const nav = useNavigate()
   useEffect(() => {
     if (!me) api.get('/auth/me').then(setMe).catch(() => nav('/login'))
-  }, [])
+  }, [me, nav, setMe])
   if (!me) return <BootSkeleton />
   return <Layout>{children}</Layout>
 }

@@ -68,21 +68,19 @@ export async function salesRoutes(app: FastifyInstance) {
     const subtotal = resolved.reduce((s, r) => s + r.subtotal, 0)
     const taxTotal = resolved.reduce((s, r) => s + r.tax, 0)
 
-    // Atomic counter + create (gapless, no MAX()+1 race)
+    // Atomic counter + create (gapless, no MAX()+1 race).
+    // NOTE: this used to be upsert() + SELECT FOR UPDATE + increment, but
+    // Prisma upsert is SELECT-then-INSERT (not atomic): concurrent first
+    // invoices of a year all INSERTed and all but one died with P2002. The
+    // pattern below is atomic at every step — INSERT..ON CONFLICT for the
+    // first row, then a single UPDATE..RETURNING that locks and increments.
     const fy = financialYear(b.issueDate ? new Date(b.issueDate) : new Date())
     const invoice = await prisma.$transaction(async (tx) => {
-      await tx.invoiceCounter.upsert({
-        where: { businessId_financialYear: { businessId: req.user!.businessId, financialYear: fy } },
-        create: { businessId: req.user!.businessId, financialYear: fy, lastNumber: 0 },
-        update: {},
-      })
-      // lock the counter row
-      await tx.$queryRaw`SELECT "lastNumber" FROM "InvoiceCounter" WHERE "businessId" = ${req.user!.businessId} AND "financialYear" = ${fy} FOR UPDATE`
-      const counter = await tx.invoiceCounter.update({
-        where: { businessId_financialYear: { businessId: req.user!.businessId, financialYear: fy } },
-        data: { lastNumber: { increment: 1 } },
-      })
-      const num = invoiceNumber(business.invoicePrefix || 'INV', fy, counter.lastNumber)
+      await tx.$executeRaw`INSERT INTO "InvoiceCounter" ("businessId", "financialYear", "lastNumber") VALUES (${req.user!.businessId}, ${fy}, 0) ON CONFLICT DO NOTHING`
+      const taken = await tx.$queryRaw<Array<{ n: number }>>`UPDATE "InvoiceCounter" SET "lastNumber" = "lastNumber" + 1 WHERE "businessId" = ${req.user!.businessId} AND "financialYear" = ${fy} RETURNING "lastNumber" AS "n"`
+      const next = taken[0]?.n
+      if (!next) throw Object.assign(new Error('counter_failed'), { statusCode: 500 })
+      const num = invoiceNumber(business.invoicePrefix || 'INV', fy, next)
       const inv = await tx.invoice.create({
         data: {
           businessId: req.user!.businessId,

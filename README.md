@@ -15,6 +15,20 @@ pnpm dev                        # web :5173 + api :3001
 
 Without Docker the API still boots; DB routes return 503 until `DATABASE_URL` connects.
 
+## Quality gates (Milestone 0)
+
+```bash
+pnpm typecheck   # tsc strict, every package
+pnpm lint        # eslint flat config, repo-wide — no echo-ok stubs
+pnpm test        # vitest: unit tests always; API integration tests need a live
+                 # DATABASE_URL (they skip without one) and force RESEND_STUB
+pnpm build       # regenerates the Prisma Client, then builds everything
+```
+
+CI (`.github/workflows/ci.yml`) runs all four on every push. Integration tests
+create `M0 Test`-prefixed businesses and delete them in `afterAll`; never point
+them at production. See `ARCHITECTURE.md` for the system map.
+
 ## Using Supabase as the database
 
 Supabase replaces the local Docker Postgres — no schema or code changes needed.

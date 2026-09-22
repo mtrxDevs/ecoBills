@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/build.mjs",
-    "lint": "echo ok",
+    "lint": "eslint .",
     "typecheck": "echo ok",
     "test": "echo ok",
     "apk:debug": "cap open android"

@@ -51,7 +51,7 @@ export async function renderInvoicePdfHtml(opts: {
 }
 
 export async function htmlToPdfBuffer(html: string): Promise<Buffer> {
-  // @ts-ignore optional dep
+  // @ts-expect-error optional dep — present only on hosts with Chromium
   const puppeteer = await import('puppeteer').catch(() => null)
   if (!puppeteer) throw new Error('pdf_unavailable: install puppeteer + chromium on the API host')
   const browser = await (puppeteer as any).launch({

@@ -125,7 +125,7 @@ Two mechanisms enforce this, and you need both:
   `<MotionConfig reducedMotion="user">` (`apps/web/src/App.tsx`).
 - **Explicit gate:** every animated element goes through a token-aware builder —
   `pageTransition(reduce)`, `cardLift(reduce)`, `pressFeedback(reduce)`,
-  `useStagger(index)`, or `motionSafe()` for one-off props. Components read
+   `useStagger(index)`, or `useMotionSafe()` for one-off props. Components read
   `useReducedMotion()` from the token module, which is **reactive**: flipping the
   OS setting applies live, without a reload.
 

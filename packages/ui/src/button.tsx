@@ -85,11 +85,16 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function 
    * an endlessly animating element.
    */
   const [slow, setSlow] = React.useState(false)
+  // Render-phase reset (the endorsed "adjust state during render" pattern):
+  // when a new loading cycle starts, the previous cycle's escalation dies here,
+  // so the effect below only ever arms its timer.
+  const [wasLoading, setWasLoading] = React.useState(loading)
+  if (loading !== wasLoading) {
+    setWasLoading(loading)
+    setSlow(false)
+  }
   React.useEffect(() => {
-    if (!loading) {
-      setSlow(false)
-      return
-    }
+    if (!loading) return
     const t = window.setTimeout(() => setSlow(true), motionLimits.loadingEscalateMs)
     return () => window.clearTimeout(t)
   }, [loading])
