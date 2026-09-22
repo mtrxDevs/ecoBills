@@ -67,6 +67,11 @@ export type { PanelProps, PanelSide } from './panel'
 export { Field, TextField, TextAreaField, SelectField } from './field'
 export type { FieldProps, FieldRenderProps, TextFieldProps, TextAreaFieldProps, SelectFieldProps } from './field'
 
+export { Combobox, ComboboxField, StateCombobox, filterOptions } from './combobox'
+export type { ComboboxProps, ComboboxFieldProps } from './combobox'
+
+export { INDIAN_STATES } from './india-states'
+
 export {
   Skeleton,
   SkeletonStats,

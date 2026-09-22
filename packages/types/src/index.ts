@@ -21,6 +21,24 @@ export const loginSchema = z.object({
   password: z.string().min(1),
 })
 
+export const verify2faSchema = z.object({
+  challengeToken: z.string().min(16).max(128),
+  code: z.string().regex(/^\d{6}$/, 'code must be 6 digits'),
+})
+
+export const resend2faSchema = z.object({
+  challengeToken: z.string().min(16).max(128),
+})
+
+export const enable2faSchema = z.object({
+  challengeToken: z.string().min(16).max(128),
+  code: z.string().regex(/^\d{6}$/, 'code must be 6 digits'),
+})
+
+export const disable2faSchema = z.object({
+  password: z.string().min(1),
+})
+
 export const createUserSchema = z.object({
   name: z.string().min(1).max(120),
   email: z.string().email(),

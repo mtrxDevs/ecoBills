@@ -5,7 +5,17 @@ import {
   setSessionCookie, clearSessionCookie, requireAuth, requirePerm,
 } from '../auth.js'
 import { audit } from '../audit.js'
-import { signupSchema, loginSchema, createUserSchema } from '@ecobills/types'
+import { sendEmail } from '../email.js'
+import {
+  generateNumericCode, hashChallengeSecret, verifyChallengeCode,
+  isChallengeUsable, render2faEmail, TWO_FA_CODE_TTL_MINUTES, TWO_FA_MAX_ATTEMPTS,
+} from '../twofactor.js'
+import {
+  signupSchema, loginSchema, createUserSchema,
+  verify2faSchema, resend2faSchema, enable2faSchema, disable2faSchema,
+} from '@ecobills/types'
+
+const STRICT_AUTH_LIMIT = { max: 20, timeWindow: '1 minute' } as const
 
 export async function authRoutes(app: FastifyInstance) {
   app.post('/auth/signup', async (req, reply) => {
@@ -33,18 +43,91 @@ export async function authRoutes(app: FastifyInstance) {
     return { user: pub(user), business }
   })
 
-  app.post('/auth/login', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
+  app.post('/auth/login', { config: { rateLimit: STRICT_AUTH_LIMIT } }, async (req, reply) => {
     if (!dbReady) return reply.code(503).send({ error: 'database_unavailable' })
     const body = loginSchema.parse(req.body)
     const user = await prisma.user.findUnique({ where: { email: body.email } })
     if (!user || !(await verifyPassword(body.password, user.passwordHash)))
       return reply.code(401).send({ error: 'invalid_credentials' })
-    const token = newSessionToken()
-    await prisma.session.create({
-      data: { userId: user.id, tokenHash: tokenHash(token), expiresAt: new Date(Date.now() + 30 * 86400e3) },
-    })
-    setSessionCookie(reply, token)
+    // No session yet when 2FA is on — the code step completes the login.
+    if (user.twoFactorEnabled) {
+      const challengeToken = await issueChallenge(user.id, user.email)
+      return { twoFactorRequired: true, challengeToken }
+    }
+    await createSession(user.id, reply)
     return { user: pub(user) }
+  })
+
+  // Complete a login challenge. Strictly rate-limited + attempt-capped.
+  app.post('/auth/2fa/verify', { config: { rateLimit: STRICT_AUTH_LIMIT } }, async (req, reply) => {
+    if (!dbReady) return reply.code(503).send({ error: 'database_unavailable' })
+    const body = verify2faSchema.parse(req.body)
+    const user = await consumeChallenge(body.challengeToken, body.code, reply)
+    if (!user) return // consumeChallenge already replied
+    await createSession(user.id, reply)
+    await audit({ businessId: user.businessId, userId: user.id, action: '2fa.login', entity: 'User', entityId: user.id })
+    return { user: pub(user) }
+  })
+
+  // New code, new challenge; the old one dies with it.
+  app.post('/auth/2fa/resend', { config: { rateLimit: STRICT_AUTH_LIMIT } }, async (req, reply) => {
+    if (!dbReady) return reply.code(503).send({ error: 'database_unavailable' })
+    const body = resend2faSchema.parse(req.body)
+    const ch = await prisma.twoFactorChallenge.findUnique({
+      where: { tokenHash: hashChallengeSecret(body.challengeToken) },
+      include: { user: true },
+    })
+    if (!ch) return reply.code(401).send({ error: 'invalid_challenge' })
+    await prisma.twoFactorChallenge.updateMany({
+      where: { userId: ch.userId, consumedAt: null },
+      data: { consumedAt: new Date() },
+    })
+    const challengeToken = await issueChallenge(ch.userId, ch.user.email)
+    return { twoFactorRequired: true, challengeToken }
+  })
+
+  // --- self-service 2FA management (any authenticated user, own account only) ---
+
+  // Step 1: prove you can read the account's email.
+  app.post('/auth/2fa/setup', { preHandler: requireAuth }, async (req) => {
+    const me = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } })
+    const challengeToken = await issueChallenge(me.id, me.email)
+    return { challengeToken }
+  })
+
+  // Step 2: enter the code → flag flips on.
+  app.post('/auth/2fa/enable', { preHandler: requireAuth }, async (req, reply) => {
+    const body = enable2faSchema.parse(req.body)
+    const ch = await prisma.twoFactorChallenge.findUnique({
+      where: { tokenHash: hashChallengeSecret(body.challengeToken) },
+    })
+    if (!ch || ch.userId !== req.user!.id || !isChallengeUsable(ch)) {
+      return reply.code(401).send({ error: 'invalid_challenge' })
+    }
+    if (!verifyChallengeCode(body.code, ch.codeHash)) {
+      await prisma.twoFactorChallenge.update({ where: { id: ch.id }, data: { attempts: { increment: 1 } } })
+      return reply.code(401).send({ error: 'invalid_code' })
+    }
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: req.user!.id }, data: { twoFactorEnabled: true } }),
+      prisma.twoFactorChallenge.updateMany({ where: { userId: req.user!.id, consumedAt: null }, data: { consumedAt: new Date() } }),
+    ])
+    await audit({ businessId: req.user!.businessId, userId: req.user!.id, action: '2fa.enable', entity: 'User', entityId: req.user!.id })
+    return { ok: true }
+  })
+
+  // Disabling requires the password — a stolen session alone can't strip 2FA.
+  app.post('/auth/2fa/disable', { preHandler: requireAuth }, async (req, reply) => {
+    const body = disable2faSchema.parse(req.body)
+    const me = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } })
+    if (!(await verifyPassword(body.password, me.passwordHash)))
+      return reply.code(401).send({ error: 'invalid_credentials' })
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: me.id }, data: { twoFactorEnabled: false } }),
+      prisma.twoFactorChallenge.deleteMany({ where: { userId: me.id } }),
+    ])
+    await audit({ businessId: req.user!.businessId, userId: req.user!.id, action: '2fa.disable', entity: 'User', entityId: me.id })
+    return { ok: true }
   })
 
   app.post('/auth/logout', async (req, reply) => {
@@ -79,6 +162,77 @@ export async function authRoutes(app: FastifyInstance) {
   })
 }
 
-function pub(u: { id: string; businessId?: string; name: string; email: string; role: string }) {
-  return { id: u.id, businessId: (u as any).businessId, name: u.name, email: u.email, role: u.role }
+/** Create a challenge, email the code, return the (plaintext) challenge token. */
+async function issueChallenge(userId: string, email: string) {
+  const code = generateNumericCode()
+  const challengeToken = newSessionToken()
+  await prisma.twoFactorChallenge.create({
+    data: {
+      userId,
+      codeHash: hashChallengeSecret(code),
+      tokenHash: hashChallengeSecret(challengeToken),
+      expiresAt: new Date(Date.now() + TWO_FA_CODE_TTL_MINUTES * 60e3),
+    },
+  })
+  const { subject, text } = render2faEmail(code)
+  const r = await sendEmail({ to: email, subject, text })
+  if (r.stub) console.log(`[2fa:stub] code for ${email}: ${code} (no RESEND_API_KEY — read it here in dev)`)
+  return challengeToken
+}
+
+/**
+ * Validate a login challenge. Returns the user on success, or replies with
+ * the failure and returns null. Single-use, expiry- and attempt-capped.
+ */
+async function consumeChallenge(challengeToken: string, code: string, reply: any) {
+  const ch = await prisma.twoFactorChallenge.findUnique({
+    where: { tokenHash: hashChallengeSecret(challengeToken) },
+    include: { user: true },
+  })
+  if (!ch || ch.consumedAt) {
+    reply.code(401).send({ error: 'invalid_challenge' })
+    return null
+  }
+  if (ch.attempts >= TWO_FA_MAX_ATTEMPTS) {
+    await prisma.twoFactorChallenge.update({ where: { id: ch.id }, data: { consumedAt: new Date() } })
+    reply.code(403).send({ error: 'challenge_locked' })
+    return null
+  }
+  if (!isChallengeUsable(ch)) {
+    // Only expiry remains (consumed/locked handled above).
+    await prisma.twoFactorChallenge.update({ where: { id: ch.id }, data: { consumedAt: new Date() } })
+    reply.code(410).send({ error: 'challenge_expired' })
+    return null
+  }
+  if (!verifyChallengeCode(code, ch.codeHash)) {
+    const attempts = ch.attempts + 1
+    await prisma.twoFactorChallenge.update({
+      where: { id: ch.id },
+      data: { attempts, ...(attempts >= TWO_FA_MAX_ATTEMPTS ? { consumedAt: new Date() } : {}) },
+    })
+    if (attempts >= TWO_FA_MAX_ATTEMPTS) {
+      await audit({ businessId: ch.user.businessId, userId: ch.userId, action: '2fa.locked', entity: 'User', entityId: ch.userId, after: { attempts } })
+      reply.code(403).send({ error: 'challenge_locked' })
+      return null
+    }
+    reply.code(401).send({ error: 'invalid_code' })
+    return null
+  }
+  await prisma.twoFactorChallenge.updateMany({
+    where: { userId: ch.userId, consumedAt: null },
+    data: { consumedAt: new Date() },
+  })
+  return ch.user
+}
+
+async function createSession(userId: string, reply: any) {
+  const token = newSessionToken()
+  await prisma.session.create({
+    data: { userId, tokenHash: tokenHash(token), expiresAt: new Date(Date.now() + 30 * 86400e3) },
+  })
+  setSessionCookie(reply, token)
+}
+
+function pub(u: { id: string; businessId?: string; name: string; email: string; role: string; twoFactorEnabled?: boolean }) {
+  return { id: u.id, businessId: (u as any).businessId, name: u.name, email: u.email, role: u.role, twoFactorEnabled: !!(u as any).twoFactorEnabled }
 }

@@ -84,9 +84,11 @@ model User {
   email        String   @unique
   passwordHash String
   role         Role     @default(staff)
+  twoFactorEnabled Boolean @default(false)
   createdAt    DateTime @default(now())
 
   sessions     Session[]
+  challenges   TwoFactorChallenge[]
   ledgerEntries StockLedger[] @relation("LedgerAuthor")
   auditLogs    AuditLog[]
 
@@ -100,6 +102,23 @@ model Session {
   tokenHash  String   @unique
   expiresAt  DateTime
   createdAt  DateTime @default(now())
+}
+
+// Email 2FA: a short-lived 6-digit code challenge. The code is stored hashed,
+// single-use (consumedAt), capped at MAX_ATTEMPTS guesses, and expires after
+// CODE_TTL_MINUTES. No session exists until verification succeeds.
+model TwoFactorChallenge {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash   String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  attempts   Int       @default(0)
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
 }
 
 model Customer {

@@ -4,10 +4,12 @@ import { motion } from 'framer-motion'
 import {
   Button,
   Card,
+  ComboboxField,
   GlassSurface,
   IconAlert,
   IconClose,
   IconPlus,
+  INDIAN_STATES,
   TextField,
   cn,
   focusRing,
@@ -67,50 +69,154 @@ export function Login() {
   const [password, setPassword] = useState('')
   const [err, setErr] = useState('')
   const [pending, setPending] = useState(false)
+  // Second step appears only when the account has two-step verification on.
+  const [challengeToken, setChallengeToken] = useState<string | null>(null)
+  const [code, setCode] = useState('')
+  const [codeErr, setCodeErr] = useState('')
+  const [resent, setResent] = useState(false)
   const nav = useNavigate()
   const { setMe } = useMe()
 
+  async function finishLogin() {
+    const me = await api.get('/auth/me')
+    setMe(me)
+    nav('/')
+  }
+
+  async function submitPassword(e: React.FormEvent) {
+    e.preventDefault()
+    setErr('')
+    setPending(true)
+    try {
+      const res = await api.post('/auth/login', { email, password })
+      if (res?.twoFactorRequired) {
+        setChallengeToken(res.challengeToken)
+        setCode('')
+        setCodeErr('')
+        setResent(false)
+      } else {
+        await finishLogin()
+      }
+    } catch {
+      setErr('Invalid email or password.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function submitCode(codeValue: string) {
+    if (!challengeToken || codeValue.length !== 6 || pending) return
+    setCodeErr('')
+    setPending(true)
+    try {
+      await api.post('/auth/2fa/verify', { challengeToken, code: codeValue })
+      await finishLogin()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : ''
+      if (msg.includes('challenge_expired')) setCodeErr('That code expired. Request a new one below.')
+      else if (msg.includes('challenge_locked')) setCodeErr('Too many wrong tries. Request a new code to try again.')
+      else if (msg.includes('invalid_challenge')) {
+        setChallengeToken(null)
+        setErr('That sign-in attempt expired. Enter your password again.')
+      } else setCodeErr('Wrong code. Check the email and try again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function resend() {
+    if (!challengeToken || pending) return
+    setPending(true)
+    try {
+      const res = await api.post('/auth/2fa/resend', { challengeToken })
+      setChallengeToken(res.challengeToken)
+      setCode('')
+      setCodeErr('')
+      setResent(true)
+    } catch {
+      setChallengeToken(null)
+      setErr('That sign-in attempt expired. Enter your password again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  // api.post throws the raw response body, so the server's error codes
+  // ('invalid_code', 'challenge_expired', …) are matched by substring below.
   return (
     <AuthShell>
       <BrandMark subtitle="Stock, billing & P&L for your shop." />
-      <form
-        className="flex flex-col gap-4"
-        noValidate
-        onSubmit={async (e) => {
-          e.preventDefault()
-          setErr('')
-          setPending(true)
-          try {
-            await api.post('/auth/login', { email, password })
-            const me = await api.get('/auth/me')
-            setMe(me)
-            nav('/')
-          } catch {
-            setErr('Invalid email or password.')
-          } finally {
-            setPending(false)
-          }
-        }}
-      >
-        <TextField
-          label="Email"
-          inputProps={{ type: 'email', autoComplete: 'username', placeholder: 'you@shop.com' }}
-          value={email}
-          onValueChange={setEmail}
-          validate={(v) => (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ? undefined : 'Enter the email you signed up with.')}
-        />
-        <TextField
-          label="Password"
-          inputProps={{ type: 'password', autoComplete: 'current-password', placeholder: 'Password' }}
-          value={password}
-          onValueChange={setPassword}
-          validate={(v) => (v ? undefined : 'Enter your password.')}
-        />
-        <FormError message={err} />
-        <Button type="submit" loading={pending} loadingLabel="Signing in" disabled={!email || !password}>
-          Log in
-        </Button>
-      </form>
+      {challengeToken ? (
+        <form
+          className="flex flex-col gap-4"
+          noValidate
+          onSubmit={(e) => {
+            e.preventDefault()
+            submitCode(code)
+          }}
+        >
+          <p className="text-sm text-[var(--color-ink-muted)]">
+            Two-step verification is on for this account. Enter the 6-digit code sent to <b>{email}</b>.
+          </p>
+          <TextField
+            label="6-digit code"
+            inputProps={{ inputMode: 'numeric', autoComplete: 'one-time-code', maxLength: 6, autoFocus: true, placeholder: '••••••' }}
+            value={code}
+            onValueChange={(v) => {
+              const digits = v.replace(/\D/g, '').slice(0, 6)
+              setCode(digits)
+              if (digits.length === 6) void submitCode(digits)
+            }}
+            validate={(v) => (v.length === 6 ? undefined : 'Enter all 6 digits.')}
+          />
+          <FormError message={codeErr} />
+          <Button type="submit" loading={pending} loadingLabel="Verifying" disabled={code.length !== 6}>
+            Verify & log in
+          </Button>
+          <div className="flex items-center justify-between text-sm">
+            <button
+              type="button"
+              className={`rounded-[var(--radius-sm)] font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
+              onClick={resend}
+            >
+              Send a new code
+            </button>
+            <button
+              type="button"
+              className={`rounded-[var(--radius-sm)] text-[var(--color-ink-muted)] underline underline-offset-2 hover:no-underline ${focusRing}`}
+              onClick={() => {
+                setChallengeToken(null)
+                setCode('')
+                setCodeErr('')
+              }}
+            >
+              Use a different account
+            </button>
+          </div>
+          {resent ? <p className="text-sm text-[var(--color-ink-muted)]">A new code is on its way.</p> : null}
+        </form>
+      ) : (
+        <form className="flex flex-col gap-4" noValidate onSubmit={submitPassword}>
+          <TextField
+            label="Email"
+            inputProps={{ type: 'email', autoComplete: 'username', placeholder: 'you@shop.com' }}
+            value={email}
+            onValueChange={setEmail}
+            validate={(v) => (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ? undefined : 'Enter the email you signed up with.')}
+          />
+          <TextField
+            label="Password"
+            inputProps={{ type: 'password', autoComplete: 'current-password', placeholder: 'Password' }}
+            value={password}
+            onValueChange={setPassword}
+            validate={(v) => (v ? undefined : 'Enter your password.')}
+          />
+          <FormError message={err} />
+          <Button type="submit" loading={pending} loadingLabel="Signing in" disabled={!email || !password}>
+            Log in
+          </Button>
+        </form>
+      )}
       <p className="mt-4 text-sm text-[var(--color-ink-muted)]">
         New here?{' '}
         <Link
@@ -207,10 +313,11 @@ export function Start() {
               onValueChange={(v) => setF({ ...f, businessName: v })}
               validate={(v) => (v.trim() ? undefined : 'This appears at the top of every invoice.')}
             />
-            <TextField
+            <ComboboxField
               label="State"
               required
-              hint="Decides CGST+SGST vs IGST on every bill."
+              hint="Decides CGST+SGST vs IGST on every bill. Type to filter the list."
+              options={INDIAN_STATES}
               value={f.state}
               onValueChange={(v) => setF({ ...f, state: v })}
               validate={(v) => (v.trim() ? undefined : 'Enter your state, for example Maharashtra.')}

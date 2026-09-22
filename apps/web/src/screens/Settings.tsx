@@ -4,9 +4,11 @@ import {
   Badge,
   Button,
   Card,
+  ComboboxField,
   EmptyState,
   ErrorState,
   IconUsers,
+  INDIAN_STATES,
   PageHint,
   PageTitle,
   SkeletonForm,
@@ -30,7 +32,7 @@ import { useMe } from '../lib/store'
 export function Settings() {
   const qc = useQueryClient()
   const toast = useToast()
-  const { me } = useMe()
+  const { me, setMe } = useMe()
   const isOwner = me?.user?.role === 'owner'
 
   const { data: biz, isLoading, isError, error, refetch } = useQuery({
@@ -117,10 +119,11 @@ export function Settings() {
             onValueChange={(v) => setF({ ...cur, name: v })}
             validate={(v) => (v.trim() ? undefined : 'Your business name appears on every invoice.')}
           />
-          <TextField
+          <ComboboxField
             label="State"
-            hint="Used to decide CGST+SGST vs IGST."
-            inputProps={{ disabled: !isOwner }}
+            hint="Used to decide CGST+SGST vs IGST. Type to filter the list."
+            options={INDIAN_STATES}
+            disabled={!isOwner}
             value={cur.state}
             onValueChange={(v) => setF({ ...cur, state: v })}
             validate={(v) => (v.trim() ? undefined : 'State is required for the GST split.')}
@@ -169,6 +172,8 @@ export function Settings() {
           </div>
         ) : null}
       </Card>
+
+      <TwoFactorSection />
 
       {isOwner ? (
         <section className="mt-6">
@@ -242,5 +247,128 @@ export function Settings() {
         </section>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * Two-step verification for your own sign-in. Role-independent: owners and
+ * staff alike protect their own account; nobody can toggle anyone else's.
+ */
+function TwoFactorSection() {
+  const { me, setMe } = useMe()
+  const toast = useToast()
+  const [token, setToken] = useState<string | null>(null)
+  const [code, setCode] = useState('')
+  const [password, setPassword] = useState('')
+  const [pending, setPending] = useState(false)
+  const enabled = !!me?.user?.twoFactorEnabled
+
+  async function refresh() {
+    setMe(await api.get('/auth/me'))
+  }
+
+  async function setup() {
+    setPending(true)
+    try {
+      const res = await api.post('/auth/2fa/setup')
+      setToken(res.challengeToken)
+      setCode('')
+    } catch {
+      toast.error('Could not start setup', 'Check the connection and try again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function enable() {
+    if (!token || code.length !== 6) return
+    setPending(true)
+    try {
+      await api.post('/auth/2fa/enable', { challengeToken: token, code })
+      setToken(null)
+      setCode('')
+      await refresh()
+      toast.success('Two-step verification is on', 'Your next sign-in will ask for an emailed code.')
+    } catch {
+      toast.error('Wrong code', 'Check the email and try again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function disable() {
+    if (!password) return
+    setPending(true)
+    try {
+      await api.post('/auth/2fa/disable', { password })
+      setPassword('')
+      await refresh()
+      toast.success('Two-step verification is off')
+    } catch {
+      toast.error('Wrong password', 'Disabling needs your current password.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <section className="mt-6">
+      <h2 className="mb-2 font-display text-lg font-semibold text-[var(--color-ink)]">Two-step verification</h2>
+      <Card>
+        <div className="flex flex-wrap items-center gap-3">
+          <Badge tone={enabled ? 'ok' : 'muted'}>{enabled ? 'On' : 'Off'}</Badge>
+          <p className="min-w-0 flex-1 text-sm text-[var(--color-ink-muted)]">
+            {enabled
+              ? 'Every sign-in to this account asks for a 6-digit code sent to your email.'
+              : 'Add a 6-digit emailed code on top of your password.'}
+          </p>
+        </div>
+
+        {!enabled && !token ? (
+          <div className="mt-4">
+            <Button loading={pending} loadingLabel="Sending code" onClick={setup}>
+              Enable — send me a code
+            </Button>
+          </div>
+        ) : null}
+
+        {!enabled && token ? (
+          <div className="mt-4 flex max-w-sm flex-col gap-3">
+            <p className="text-sm text-[var(--color-ink-muted)]">
+              Enter the 6-digit code sent to <b>{me?.user?.email}</b>.
+            </p>
+            <TextField
+              label="6-digit code"
+              inputProps={{ inputMode: 'numeric', maxLength: 6, autoFocus: true, placeholder: '••••••' }}
+              value={code}
+              onValueChange={(v) => setCode(v.replace(/\D/g, '').slice(0, 6))}
+              validate={(v) => (v.length === 6 ? undefined : 'Enter all 6 digits.')}
+            />
+            <div>
+              <Button loading={pending} loadingLabel="Confirming" disabled={code.length !== 6} onClick={enable}>
+                Confirm & turn on
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        {enabled ? (
+          <div className="mt-4 flex max-w-sm flex-col gap-3">
+            <TextField
+              label="Current password"
+              hint="Turning it off needs your password, so a stolen session alone can't do it."
+              inputProps={{ type: 'password', autoComplete: 'current-password' }}
+              value={password}
+              onValueChange={setPassword}
+            />
+            <div>
+              <Button variant="danger" loading={pending} loadingLabel="Turning off" disabled={!password} onClick={disable}>
+                Turn off
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </Card>
+    </section>
   )
 }
