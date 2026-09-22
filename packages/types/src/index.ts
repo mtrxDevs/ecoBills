@@ -99,6 +99,8 @@ export const recordPaymentSchema = z.object({
   amount: z.number().int().positive(),
   method: z.enum(['cash', 'card', 'upi', 'bank_transfer', 'other']).default('cash'),
   note: z.string().max(300).default(''),
+  // Optional ISO date for backdated collection; defaults to now server-side.
+  paidAt: z.string().max(30).optional(),
 })
 
 export const createCreditNoteSchema = z.object({

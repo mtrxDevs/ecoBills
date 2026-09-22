@@ -12,10 +12,12 @@ import {
   IconDownload,
   PageHint,
   PageTitle,
+  Panel,
   Select,
   SkeletonList,
   StaggerItem,
   StaggerList,
+  TextField,
   focusRing,
   motionLimits,
   useToast,
@@ -27,7 +29,12 @@ import { useMe } from '../lib/store'
  * Billing. Every endpoint, payload and permission rule is unchanged:
  *   GET  /items  /customers  /invoices
  *   POST /invoices            { customerId, lines: [{ itemId, qty }] }
+ *   POST /invoices/:id/payments  { amount, method, note, paidAt? }  (owner+staff)
  *   POST /invoices/:id/void   (owner only, and only when nothing was paid)
+ *
+ * The recent-bills list now finishes the cashier flow: outstanding balances
+ * with age, and a record-payment dialog (amount prefilled to the balance,
+ * method/date/note) so "Create bill → Paid by UPI" happens in one place.
  *
  * Presentation changes only: emoji glyphs (✕ / ✓) are replaced by the shared
  * line-icon set, the "Created bill" checkmark is now a morph on the button
@@ -79,6 +86,16 @@ export function Billing() {
     .slice(0, 6)
   const total = lines.reduce((s, l) => s + l.qty * l.unitPrice, 0)
   const billList: any[] = invoices || []
+  const [paying, setPaying] = useState<any>(null)
+
+  // Money still owed: unpaid + partial invoices, oldest pressure first.
+  const outstanding = billList
+    .filter((inv: any) => inv.status === 'unpaid' || inv.status === 'partial')
+    .map((inv: any) => ({ ...inv, balance: inv.grandTotal - (inv.amountPaid || 0) }))
+    .sort(
+      (a: any, b: any) => new Date(a.issueDate).getTime() - new Date(b.issueDate).getTime(),
+    )
+  const outstandingTotal = outstanding.reduce((s: number, inv: any) => s + inv.balance, 0)
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -239,6 +256,17 @@ export function Billing() {
       <div>
         <h2 className="mb-2 font-display text-lg font-semibold text-[var(--color-ink)]">Recent bills</h2>
 
+        {!invoicesLoading && !invoicesError && outstanding.length ? (
+          <Card className="mb-3 border-[var(--color-warn)]/40 bg-[var(--color-warn-tint)]">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <p className="text-sm font-medium text-[var(--color-warn-text)]">
+                Outstanding · {outstanding.length} {outstanding.length === 1 ? 'bill' : 'bills'}
+              </p>
+              <p className="tnum font-display text-xl font-bold text-[var(--color-warn-text)]">{money(outstandingTotal)}</p>
+            </div>
+          </Card>
+        ) : null}
+
         {invoicesLoading ? (
           <SkeletonList rows={4} />
         ) : invoicesError ? (
@@ -266,6 +294,20 @@ export function Billing() {
                     <span className="capitalize">{inv.status}</span>
                     <span className="tnum"> · paid {money(inv.amountPaid || 0)}</span>
                   </Badge>
+                  {inv.status === 'unpaid' || inv.status === 'partial' ? (
+                    <span className="tnum text-xs text-[var(--color-warn-text)]">
+                      {money(inv.grandTotal - (inv.amountPaid || 0))} due · {ageLabel(inv.issueDate)}
+                    </span>
+                  ) : null}
+                  {inv.status === 'unpaid' || inv.status === 'partial' ? (
+                    <button
+                      type="button"
+                      className={`rounded-[var(--radius-sm)] text-xs font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
+                      onClick={() => setPaying(inv)}
+                    >
+                      Record payment
+                    </button>
+                  ) : null}
                   {isOwner && inv.status !== 'void' && !(inv.amountPaid > 0) ? (
                     <button
                       type="button"
@@ -284,6 +326,136 @@ export function Billing() {
           </Card>
         )}
       </div>
+      {paying ? (
+        <RecordPaymentDialog
+          inv={paying}
+          onClose={() => setPaying(null)}
+          onRecorded={() => {
+            setPaying(null)
+            qc.invalidateQueries({ queryKey: ['invoices'] })
+          }}
+        />
+      ) : null}
     </div>
   )
+}
+
+/** Whole days between the issue date and now, for pressure display. */
+function ageLabel(issueDate: string) {
+  const days = Math.max(0, Math.floor((Date.now() - new Date(issueDate).getTime()) / 86400e3))
+  if (days <= 0) return 'today'
+  if (days === 1) return '1 day old'
+  return `${days} days old`
+}
+
+/**
+ * "Create bill → Paid by UPI" in one place. Amount defaults to the full
+ * balance (partial payments just type less), method/date/note recorded with
+ * the payment. Both Owner and Staff can collect — the server enforces that.
+ */
+function RecordPaymentDialog({ inv, onClose, onRecorded }: { inv: any; onClose: () => void; onRecorded: () => void }) {
+  const toast = useToast()
+  const balance = inv.grandTotal - (inv.amountPaid || 0)
+  const [amount, setAmount] = useState((balance / 100).toFixed(2))
+  const [method, setMethod] = useState('upi')
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [note, setNote] = useState('')
+  const [pending, setPending] = useState(false)
+
+  const paise = Math.round(Number(amount || 0) * 100)
+  const valid = paise > 0 && paise <= balance
+
+  async function submit() {
+    if (!valid || pending) return
+    setPending(true)
+    try {
+      await api.post(`/invoices/${inv.id}/payments`, {
+        amount: paise,
+        method,
+        note,
+        paidAt: new Date(date).toISOString(),
+      })
+      toast.success(paise >= balance ? 'Paid in full' : 'Payment recorded', `${money(paise)} by ${methodLabel(method)} on ${inv.invoiceNumber}.`)
+      onRecorded()
+    } catch (e) {
+      toast.error('Could not record the payment', e instanceof Error ? e.message : undefined)
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <Panel
+      open
+      onClose={onClose}
+      side="center"
+      size="sm"
+      title={`Record payment · ${inv.invoiceNumber}`}
+      description={`${money(inv.amountPaid || 0)} paid of ${money(inv.grandTotal)} — ${money(balance)} still due.`}
+      footer={
+        <div className="flex flex-wrap gap-2">
+          <Button className="flex-1" loading={pending} loadingLabel="Recording" disabled={!valid} onClick={submit}>
+            Record {money(Number.isFinite(paise) ? Math.max(0, paise) : 0)}
+          </Button>
+          <Button variant="secondary" onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+        </div>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <TextField
+          label="Amount (₹)"
+          inputProps={{ inputMode: 'decimal', autoFocus: true, placeholder: (balance / 100).toFixed(2) }}
+          value={amount}
+          onValueChange={(v) => setAmount(v.replace(/[^0-9.]/g, ''))}
+          validate={(v) => {
+            const p = Math.round(Number(v || 0) * 100)
+            if (!(p > 0)) return 'Enter an amount greater than zero.'
+            if (p > balance) return `At most ${money(balance)} is due on this bill.`
+            return undefined
+          }}
+        />
+        <div>
+          <label htmlFor="pay-method" className="mb-1 block text-xs font-medium uppercase tracking-wide text-[var(--color-ink-muted)]">
+            Method
+          </label>
+          <Select id="pay-method" value={method} onChange={(e) => setMethod(e.target.value)}>
+            <option value="cash">Cash</option>
+            <option value="card">Card</option>
+            <option value="upi">UPI</option>
+            <option value="bank_transfer">Bank transfer</option>
+            <option value="other">Other</option>
+          </Select>
+        </div>
+        <TextField
+          label="Date"
+          inputProps={{ type: 'date' }}
+          value={date}
+          onValueChange={setDate}
+        />
+        <TextField
+          label="Note"
+          hint="Optional — reference number, split details, anything."
+          value={note}
+          onValueChange={setNote}
+        />
+      </div>
+    </Panel>
+  )
+}
+
+function methodLabel(method: string) {
+  switch (method) {
+    case 'cash':
+      return 'Cash'
+    case 'card':
+      return 'Card'
+    case 'upi':
+      return 'UPI'
+    case 'bank_transfer':
+      return 'Bank transfer'
+    default:
+      return 'Other'
+  }
 }

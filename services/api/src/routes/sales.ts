@@ -122,8 +122,13 @@ export async function salesRoutes(app: FastifyInstance) {
     if (inv.status === 'void') return reply.code(400).send({ error: 'invoice_void' })
     const paid = inv.payments.reduce((s, p) => s + p.amount, 0)
     if (paid + b.amount > inv.grandTotal) return reply.code(400).send({ error: 'overpayment' })
+    let paidAt: Date | undefined
+    if (b.paidAt !== undefined) {
+      paidAt = new Date(b.paidAt)
+      if (Number.isNaN(paidAt.getTime())) return reply.code(400).send({ error: 'validation', message: 'paidAt must be a valid date' })
+    }
     const pay = await prisma.payment.create({
-      data: { businessId: req.user!.businessId, invoiceId: inv.id, amount: b.amount, method: b.method as any, note: b.note },
+      data: { businessId: req.user!.businessId, invoiceId: inv.id, amount: b.amount, method: b.method as any, note: b.note, ...(paidAt ? { paidAt } : {}) },
     })
     const now = paid + b.amount
     await prisma.invoice.update({ where: { id: inv.id }, data: { status: now >= inv.grandTotal ? 'paid' : now > 0 ? 'partial' : 'unpaid' } })
