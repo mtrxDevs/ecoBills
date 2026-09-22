@@ -121,19 +121,19 @@ importers:
 
   packages/ui:
     dependencies:
+      '@types/react':
+        specifier: ^18.3.3
+        version: 18.3.31
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
+      framer-motion:
+        specifier: ^11.3.19
+        version: 11.18.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       react:
         specifier: ^18
         version: 18.3.1
     devDependencies:
-      '@types/react':
-        specifier: ^18.3.3
-        version: 18.3.31
-      framer-motion:
-        specifier: ^11.3.19
-        version: 11.18.2(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       typescript:
         specifier: ^5.5.4
         version: 5.9.3

@@ -15,11 +15,11 @@
     "framer-motion": "^11"
   },
   "dependencies": {
-    "clsx": "^2.1.1"
+    "clsx": "^2.1.1",
+    "framer-motion": "^11.3.19",
+    "@types/react": "^18.3.3"
   },
   "devDependencies": {
-    "@types/react": "^18.3.3",
-    "typescript": "^5.5.4",
-    "framer-motion": "^11.3.19"
+    "typescript": "^5.5.4"
   }
 }
