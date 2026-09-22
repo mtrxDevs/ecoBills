@@ -16,7 +16,7 @@ import {
   pageTransition,
   useReducedMotion,
 } from '@ecobills/ui'
-import { api } from '../lib/api'
+import { api, errorCode } from '../lib/api'
 import { useMe } from '../lib/store'
 
 /**
@@ -112,13 +112,13 @@ export function Login() {
       await api.post('/auth/2fa/verify', { challengeToken, code: codeValue })
       await finishLogin()
     } catch (e) {
-      const msg = e instanceof Error ? e.message : ''
-      if (msg.includes('challenge_expired')) setCodeErr('That code expired. Request a new one below.')
-      else if (msg.includes('challenge_locked')) setCodeErr('Too many wrong tries. Request a new code to try again.')
-      else if (msg.includes('invalid_challenge')) {
+      const code = errorCode(e)
+      if (code === 'challenge_expired') setCodeErr('That code expired. Request a new one below.')
+      else if (code === 'challenge_locked') setCodeErr('Too many wrong tries. Request a new code to try again.')
+      else if (code === 'invalid_challenge') {
         setChallengeToken(null)
         setErr('That sign-in attempt expired. Enter your password again.')
-      } else setCodeErr('Wrong code. Check the email and try again.')
+      } else setCodeErr(e instanceof Error ? e.message : 'Wrong code. Check the email and try again.')
     } finally {
       setPending(false)
     }
@@ -289,10 +289,10 @@ export function Start() {
       setVerifyToken(null)
       setStep(2)
     } catch (e) {
-      const msg = e instanceof Error ? e.message : ''
-      if (msg.includes('challenge_expired')) setCodeErr('That code expired. Request a new one below.')
-      else if (msg.includes('challenge_locked')) setCodeErr('Too many wrong tries. Request a new code to try again.')
-      else setCodeErr('Wrong code. Check the email and try again.')
+      const code = errorCode(e)
+      if (code === 'challenge_expired') setCodeErr('That code expired. Request a new one below.')
+      else if (code === 'challenge_locked') setCodeErr('Too many wrong tries. Request a new code to try again.')
+      else setCodeErr(e instanceof Error ? e.message : 'Wrong code. Check the email and try again.')
     } finally {
       setPending(false)
     }

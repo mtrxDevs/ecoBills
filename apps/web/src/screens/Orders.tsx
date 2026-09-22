@@ -7,15 +7,18 @@ import {
   EmptyState,
   ErrorState,
   IconCheck,
+  IconClose,
   IconWarning,
   PageHint,
   PageTitle,
   Panel,
+  Select,
   SkeletonList,
   StaggerItem,
   StaggerList,
   TextAreaField,
   TextField,
+  focusRing,
   motionLimits,
   useToast,
 } from '@ecobills/ui'
@@ -25,10 +28,12 @@ import { useMe } from '../lib/store'
 /**
  * Orders. Endpoints, payloads and the human-in-the-loop invariant are
  * unchanged from v0.1.1:
- *   GET  /purchase-orders
+ *   GET  /purchase-orders            GET /suppliers          GET /items
+ *   POST /purchase-orders            { supplierId, lines: [{ itemId, qtyRequested }] }
  *   POST /purchase-orders/from-low-stock
  *   POST /purchase-orders/:id/send      { subject, body }   (owner only)
  *   POST /purchase-orders/:id/receive   { lines: [{ lineId, qtyReceived }] }
+ *   POST /suppliers  PATCH /suppliers/:id   (distributor address book)
  *
  * A draft is still only ever sent by an explicit click, the preview still says
  * so, and no auto-email is introduced. The hand-rolled fixed overlay became a
@@ -43,6 +48,7 @@ export function Orders() {
   const isOwner = me?.user?.role === 'owner'
   const [preview, setPreview] = useState<any>(null)
   const [celebrate, setCelebrate] = useState(false)
+  const [drafting, setDrafting] = useState(false)
 
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['pos'],
@@ -83,6 +89,15 @@ export function Orders() {
     onError: (e: any) => toast.error('Could not receive this order', e instanceof Error ? e.message : undefined),
   })
 
+  // After a manual draft, open its full preview (with item names) straight away.
+  async function openDraft(id: string) {
+    await qc.invalidateQueries({ queryKey: ['pos'] })
+    const list = (await qc.fetchQuery({ queryKey: ['pos'], queryFn: () => api.get('/purchase-orders') })) as any[]
+    const po = (list || []).find((p) => p.id === id)
+    setDrafting(false)
+    if (po) setPreview(po)
+  }
+
   const orders: any[] = data || []
 
   return (
@@ -92,9 +107,14 @@ export function Orders() {
           <PageTitle>Orders</PageTitle>
           <PageHint>Draft, preview, send. Nothing leaves your shop until you click Send.</PageHint>
         </div>
-        <Button onClick={() => fromLow.mutate()} loading={fromLow.isPending} loadingLabel="Drafting order">
-          Review low-stock order
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={() => setDrafting(true)}>
+            New order
+          </Button>
+          <Button onClick={() => fromLow.mutate()} loading={fromLow.isPending} loadingLabel="Drafting order">
+            Review low-stock order
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -273,6 +293,235 @@ export function Orders() {
           )
         ) : null}
       </Panel>
+
+      {drafting ? <NewOrderDialog onClose={() => setDrafting(false)} onDrafted={(id) => void openDraft(id)} /> : null}
     </div>
+  )
+}
+
+/**
+ * Manual purchase order: pick a distributor (or add one with its email),
+ * confirm where the order goes, pick what to order — then it lands in the
+ * same preview → explicit Send flow as every other draft. Nothing here sends.
+ */
+function NewOrderDialog({ onClose, onDrafted }: { onClose: () => void; onDrafted: (id: string) => void }) {
+  const qc = useQueryClient()
+  const toast = useToast()
+  const { data: suppliers } = useQuery({ queryKey: ['suppliers'], queryFn: () => api.get('/suppliers') })
+  const { data: items } = useQuery({ queryKey: ['items-all'], queryFn: () => api.get('/items') })
+  const [supplierId, setSupplierId] = useState('')
+  const [newName, setNewName] = useState('')
+  const [newEmail, setNewEmail] = useState('')
+  const [email, setEmail] = useState('')
+  const [emailTouched, setEmailTouched] = useState(false)
+  const [search, setSearch] = useState('')
+  const [lines, setLines] = useState<Array<{ itemId: string; name: string; qty: number }>>([])
+  const [pending, setPending] = useState(false)
+
+  const supplierList: any[] = suppliers || []
+  const supplier = supplierList.find((s) => s.id === supplierId)
+  const isNew = supplierId === '__new'
+
+  function pickSupplier(id: string) {
+    setSupplierId(id)
+    setEmailTouched(false)
+    if (id === '__new') {
+      setEmail(newEmail)
+    } else {
+      const s = supplierList.find((x) => x.id === id)
+      setEmail(s?.contactEmail || '')
+    }
+  }
+
+  const found = (items || [])
+    .filter(
+      (i: any) =>
+        !search ||
+        i.name.toLowerCase().includes(search.toLowerCase()) ||
+        i.sku.toLowerCase().includes(search.toLowerCase()),
+    )
+    .slice(0, 6)
+
+  const canDraft =
+    (supplierId && !isNew ? true : isNew && newName.trim() ? true : false) &&
+    lines.length > 0 &&
+    lines.every((l) => l.qty > 0)
+
+  async function draft() {
+    if (!canDraft || pending) return
+    setPending(true)
+    try {
+      let sid = supplierId
+      if (isNew) {
+        const created = await api.post('/suppliers', { name: newName.trim(), contactEmail: newEmail.trim() })
+        sid = created.id
+        await qc.invalidateQueries({ queryKey: ['suppliers'] })
+        if (email.trim() === '') setEmail(newEmail.trim())
+      } else if (email.trim() !== '' && email.trim() !== (supplier?.contactEmail || '')) {
+        // The order goes to the edited address — save it back to the book.
+        await api.patch(`/suppliers/${sid}`, { contactEmail: email.trim() })
+        await qc.invalidateQueries({ queryKey: ['suppliers'] })
+      }
+      const po = await api.post('/purchase-orders', {
+        supplierId: sid,
+        lines: lines.map((l) => ({ itemId: l.itemId, qtyRequested: l.qty })),
+      })
+      onDrafted(po.id)
+    } catch (e) {
+      toast.error('Could not draft the order', e instanceof Error ? e.message : undefined)
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <Panel
+      open
+      onClose={onClose}
+      side="center"
+      size="lg"
+      title="New order"
+      description="Pick a distributor and what you want. This only drafts — you still preview and send it yourself."
+      footer={
+        <div className="flex flex-wrap gap-2">
+          <Button className="flex-1" loading={pending} loadingLabel="Drafting order" disabled={!canDraft} onClick={draft}>
+            Draft order
+          </Button>
+          <Button variant="secondary" onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+        </div>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <div>
+          <label htmlFor="order-supplier" className="mb-1 block text-xs font-medium uppercase tracking-wide text-[var(--color-ink-muted)]">
+            Distributor
+          </label>
+          <Select id="order-supplier" value={supplierId} onChange={(e) => pickSupplier(e.target.value)}>
+            <option value="">Choose a distributor…</option>
+            {supplierList.map((s: any) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+                {s.contactEmail ? '' : ' (no email on file)'}
+              </option>
+            ))}
+            <option value="__new">+ New distributor…</option>
+          </Select>
+        </div>
+
+        {isNew ? (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <TextField
+              label="Distributor name"
+              value={newName}
+              onValueChange={(v) => {
+                setNewName(v)
+                if (!emailTouched) setEmail(newEmail)
+              }}
+              validate={(v) => (v.trim() ? undefined : 'Enter the distributor name.')}
+            />
+            <TextField
+              label="Distributor email"
+              inputProps={{ type: 'email', placeholder: 'orders@supplier.com' }}
+              value={newEmail}
+              onValueChange={(v) => {
+                setNewEmail(v)
+                if (!emailTouched) setEmail(v)
+              }}
+              validate={(v) =>
+                v.trim() === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ? undefined : 'Enter a valid email address.'
+              }
+            />
+          </div>
+        ) : null}
+
+        <TextField
+          label="Send the order to"
+          hint={email.trim() === '' ? 'No email on file — add one, or the order cannot be sent.' : 'This is where Send will deliver it.'}
+          inputProps={{ type: 'email', placeholder: 'orders@supplier.com' }}
+          value={email}
+          onValueChange={(v) => {
+            setEmail(v)
+            setEmailTouched(true)
+          }}
+          validate={(v) =>
+            v.trim() === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ? undefined : 'Enter a valid email address.'
+          }
+        />
+
+        <div>
+          <label htmlFor="order-search" className="mb-1 block text-xs font-medium uppercase tracking-wide text-[var(--color-ink-muted)]">
+            What do you want to order?
+          </label>
+          <input
+            id="order-search"
+            placeholder="Type or scan item name / SKU…"
+            autoComplete="off"
+            className={`w-full rounded-[var(--radius-control)] border border-[var(--color-border-input)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-ink)] placeholder:text-[var(--color-ink-subtle)] ${focusRing}`}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {search ? (
+            <ul className="mt-1 overflow-hidden rounded-[var(--radius-control)] border border-[var(--color-border)] bg-[var(--color-surface)]">
+              {found.map((i: any) => (
+                <li key={i.id}>
+                  <button
+                    type="button"
+                    className={`flex w-full justify-between px-3 py-2 text-left text-sm text-[var(--color-ink)] transition-colors duration-[var(--dur-fast)] hover:bg-[var(--color-surface-2)] ${focusRing}`}
+                    onClick={() => {
+                      if (!lines.some((l) => l.itemId === i.id)) {
+                        setLines([...lines, { itemId: i.id, name: i.name, qty: 1 }])
+                      }
+                      setSearch('')
+                    }}
+                  >
+                    <span>
+                      {i.name} <span className="text-[var(--color-ink-subtle)]">{i.sku}</span>
+                    </span>
+                    <span className="tnum">{money(i.costPrice)}</span>
+                  </button>
+                </li>
+              ))}
+              {!found.length ? (
+                <li className="px-3 py-3 text-center text-sm text-[var(--color-ink-muted)]">No item matches “{search}”.</li>
+              ) : null}
+            </ul>
+          ) : null}
+        </div>
+
+        {lines.length ? (
+          <ul className="divide-y divide-[var(--color-border)] rounded-[var(--radius-control)] border border-[var(--color-border)]">
+            {lines.map((l, i) => (
+              <li key={l.itemId} className="flex items-center gap-2 px-3 py-2 text-sm">
+                <span className="min-w-0 flex-1 truncate text-[var(--color-ink)]">{l.name}</span>
+                <label htmlFor={`order-qty-${i}`} className="sr-only">
+                  Quantity for {l.name}
+                </label>
+                <input
+                  id={`order-qty-${i}`}
+                  type="number"
+                  min={0.001}
+                  step="any"
+                  className={`tnum w-20 rounded-[var(--radius-sm)] border border-[var(--color-border-input)] bg-[var(--color-surface)] px-2 py-1 text-[var(--color-ink)] ${focusRing}`}
+                  value={l.qty}
+                  onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, qty: Number(e.target.value) } : x)))}
+                />
+                <button
+                  type="button"
+                  aria-label={`Remove ${l.name}`}
+                  className={`rounded-[var(--radius-sm)] p-1 text-[var(--color-ink-muted)] hover:text-[var(--color-danger-text)] ${focusRing}`}
+                  onClick={() => setLines(lines.filter((_, j) => j !== i))}
+                >
+                  <IconClose className="text-sm" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-[var(--color-ink-muted)]">No items yet — search above to add what you want to order.</p>
+        )}
+      </div>
+    </Panel>
   )
 }
