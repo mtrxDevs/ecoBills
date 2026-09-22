@@ -55,7 +55,8 @@ async function main() {
     console.log(`[api] serving web UI from ${webDist}`)
   }
 
-  const port = Number(process.env.API_PORT || 3001)
+  // Render/Railway/Fly inject PORT; local dev uses API_PORT (default 3001).
+  const port = Number(process.env.PORT || process.env.API_PORT || 3001)
   connectDb().catch(() => {})
   await app.listen({ port, host: '0.0.0.0' })
   console.log(`[api] listening on :${port}`)
