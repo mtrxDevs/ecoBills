@@ -60,9 +60,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
         aria-label="Primary"
       >
         <div className="flex items-center gap-2">
-          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-[var(--radius-control)] bg-[var(--color-accent-tint)] font-display text-base font-bold text-[var(--color-accent-text)]">
-            e
-          </span>
+          <img
+            src="/logo.png"
+            alt="ecoBills"
+            className="h-9 w-9 shrink-0 rounded-[var(--radius-control)] object-cover"
+          />
           <span className="hidden font-display text-xl font-bold text-[var(--color-ink)] md:inline">
             <span className="text-[var(--color-accent-text)]">eco</span>Bills
           </span>

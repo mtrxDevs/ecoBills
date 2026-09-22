@@ -195,10 +195,21 @@ async function issueChallenge(userId: string, email: string, purpose: 'two_facto
       expiresAt: new Date(Date.now() + TWO_FA_CODE_TTL_MINUTES * 60e3),
     },
   })
-  const { subject, text } = render2faEmail(code, 'ecoBills', purpose === 'email_verify' ? 'verify' : 'signin')
-  const r = await sendEmail({ to: email, subject, text })
+  const { subject, text, html } = render2faEmail(code, 'ecoBills', purpose === 'email_verify' ? 'verify' : 'signin', publicLogoUrl())
+  const r = await sendEmail({ to: email, subject, text, html })
   if (r.stub) console.log(`[2fa:stub] code for ${email}: ${code} (no RESEND_API_KEY — read it here in dev)`)
   return challengeToken
+}
+
+/**
+ * Absolute logo URL for emails, or undefined when there is no public base to
+ * hang it on (local dev serves localhost, which no inbox can load — the
+ * template falls back to a text brand mark instead of a broken image).
+ */
+function publicLogoUrl() {
+  const base = (process.env.APP_URL || '').split(',')[0].trim().replace(/\/$/, '')
+  if (!base || /localhost|127\.0\.0\.1/i.test(base)) return undefined
+  return `${base}/logo.png`
 }
 
 /**

@@ -5,10 +5,12 @@ export async function sendEmail(opts: {
   to: string
   subject: string
   text: string
+  html?: string
   idempotencyKey?: string
 }): Promise<{ providerId: string; stub: boolean }> {
   const key = process.env.RESEND_API_KEY
-  if (!key) {
+  // RESEND_STUB=1 forces the stub (local e2e without spending sends).
+  if (!key || process.env.RESEND_STUB === '1') {
     console.log(`[email:stub] to=${opts.to} subject=${opts.subject}`)
     return { providerId: `stub-${Date.now()}`, stub: true }
   }
@@ -24,6 +26,7 @@ export async function sendEmail(opts: {
       to: [opts.to],
       subject: opts.subject,
       text: opts.text,
+      ...(opts.html ? { html: opts.html } : {}),
     }),
   })
   if (!res.ok) {
