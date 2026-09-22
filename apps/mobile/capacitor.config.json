@@ -1,0 +1,11 @@
+{
+  "appId": "works.mtrx.ecobills",
+  "appName": "ecoBills",
+  "webDir": "dist-dashboard",
+  "backgroundColor": "#FAFAF8",
+  "android": { "allowMixedContent": false },
+  "plugins": {
+    "SplashScreen": { "launchShowDuration": 800, "backgroundColor": "#FAFAF8" },
+    "PushNotifications": { "presentationOptions": ["badge", "sound", "alert"] }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@ecobills/prisma",
+  "version": "0.1.1",
+  "private": true,
+  "scripts": {
+    "migrate:dev": "node scripts/with-env.mjs migrate dev",
+    "migrate:deploy": "node scripts/with-env.mjs migrate deploy",
+    "generate": "node scripts/with-env.mjs generate"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.18.0"
+  },
+  "devDependencies": {
+    "prisma": "^5.18.0",
+    "typescript": "^5.5.4"
+  }
+}

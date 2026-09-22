@@ -1,0 +1,25 @@
+{
+  "name": "@ecobills/mobile",
+  "version": "0.1.1",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "lint": "echo ok",
+    "typecheck": "echo ok",
+    "test": "echo ok",
+    "apk:debug": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.0",
+    "@capacitor/app": "^6.0.0",
+    "@capacitor/core": "^6.1.0",
+    "@capacitor/push-notifications": "^6.0.0",
+    "@capacitor/splash-screen": "^6.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.0",
+    "cross-env": "^7.0.3",
+    "vite": "^5.4.0"
+  }
+}

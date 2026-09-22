@@ -1,0 +1,6 @@
+{
+  "name": "@ecobills/config",
+  "version": "0.1.1",
+  "private": true,
+  "files": ["tailwind.preset.js", "tokens.css", "tsconfig.base.json"]
+}

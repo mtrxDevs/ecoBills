@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   Base layer
+   --------------------------------------------------------------------------
+   All colour, surface, radius, spacing, blur and motion values come from
+   `packages/config/tokens.css`, which `main.tsx` imports before this file.
+   Nothing in here declares a duration or an easing of its own: motion lives in
+   the Framer Motion token module (`apps/web/src/lib/motion.ts`) so it can be
+   reduced-motion aware, which a CSS keyframe cannot be on its own.
+
+   The only CSS transitions used in the app are colour and opacity, which spec
+   §7 explicitly keeps under `prefers-reduced-motion`.
+   ========================================================================== */
+
+@layer base {
+  html {
+    /* Satoshi for display, Inter for UI — see index.html for the font loads. */
+    font-family: Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    background: var(--color-canvas);
+  }
+
+  body {
+    background: var(--color-canvas);
+    color: var(--color-ink);
+  }
+
+  /*
+   * Focus visibility, everywhere, >=3:1 against adjacent colours.
+   * `outline-offset` keeps the ring on the page background rather than on the
+   * control's own fill, so a ring on a green button is still legible.
+   */
+  :focus-visible {
+    outline: 2px solid var(--color-focus-ring);
+    outline-offset: 2px;
+  }
+
+  /* Windows High Contrast / forced-colors: let the OS draw the ring. */
+  @media (forced-colors: active) {
+    :focus-visible {
+      outline: 3px solid CanvasText;
+    }
+  }
+}
+
+@layer components {
+  .font-display {
+    font-family: Satoshi, Inter, system-ui, sans-serif;
+  }
+
+  /*
+   * Financial figures and stock counts MUST use tabular figures (spec §7).
+   * `font-variant-numeric` covers Inter and Satoshi; the feature setting is
+   * the belt-and-braces fallback for engines that only honour `font-feature-settings`.
+   */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /*
+   * Deliberately NOT the usual `* { animation: none; transition: none }` reset.
+   * Spec §7 requires opacity and colour crossfades to SURVIVE reduced motion —
+   * a blanket reset would flatten every hover and focus response and make the
+   * interface feel broken. Transform-based motion is stripped in JS instead,
+   * where the tokens are, and this app ships no CSS transform animations at all.
+   */
+  html {
+    scroll-behavior: auto;
+  }
+}

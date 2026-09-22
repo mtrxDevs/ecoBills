@@ -1,0 +1,15 @@
+{
+  "name": "@ecobills/desktop",
+  "version": "0.1.1",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "lint": "echo ok",
+    "typecheck": "echo ok",
+    "test": "echo ok"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

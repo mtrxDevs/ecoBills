@@ -1,0 +1,276 @@
+/* ==========================================================================
+   ecoBills — design + motion tokens  (spec §7 "Design system")
+   --------------------------------------------------------------------------
+   The single source of truth for colour, surface/elevation, radius, spacing,
+   blur and the whole MOTION scale.
+
+   Consumed by:
+     - apps/web/src/main.tsx   (imported once, before index.css)
+     - packages/config/tailwind.preset.js  (mirrors the same numbers for
+       Tailwind utility classes — keep the two in sync; the preset is the
+       only place Tailwind values may be declared)
+     - packages/ui/src/motion-tokens.ts    (mirrors the motion numbers as
+       typed constants for JS/Framer Motion — same scale, seconds instead of ms)
+
+   Colour contrast: every foreground token below is WCAG 2.2 AA verified
+   against the surface it is documented to sit on. Ratios in the comments are
+   measured, not estimated. Where a hue cannot carry text at 4.5:1 the text
+   role is split out into its own token (e.g. --color-accent vs
+   --color-accent-text) rather than silently failing.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. LIGHT (default — matches the shipped v0.1.1 appearance)
+   -------------------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+
+  /* ---- colour: surfaces -------------------------------------------------- */
+  --color-canvas: #fafaf8;          /* app background (spec §7) */
+  --color-surface: #ffffff;         /* cards, tables */
+  --color-surface-2: #f4f5f2;       /* recessed rows, table headers */
+  --color-surface-3: #eceee9;       /* deepest recess, track backgrounds */
+
+  /* ---- colour: text ----------------------------------------------------- */
+  --color-ink: #14171c;             /* 17.96:1 on surface (spec §7) */
+  --color-ink-muted: #5a6270;       /*  6.15:1 on surface — helper text */
+  --color-ink-subtle: #5f6774;      /*  5.71:1 on surface, 4.89:1 on surface-3 */
+  --color-ink-on-action: #ffffff;   /*  4.53:1 on --color-action (light mode) */
+
+  /* ---- colour: border --------------------------------------------------- */
+  --color-border: rgba(20, 23, 28, 0.1);          /* decorative separation */
+  --color-border-strong: rgba(20, 23, 28, 0.24);  /* emphasis separation */
+  --color-border-input: rgba(20, 23, 28, 0.52);   /* 3.64:1 on surface — non-text UI (WCAG 1.4.11) */
+
+  /* ---- colour: accent / action ------------------------------------------ */
+  --color-accent: #17a673;          /* ecoBills accent: tints, borders, charts, dark-mode fills */
+  --color-accent-text: #0f6e4b;     /*  6.26:1 on surface — accent used AS TEXT */
+  --color-accent-bright: #85e46b;   /* mtrx.labs bright accent (dark-mode text/active) */
+  --color-brand: #1e8906;           /* real mtrx.labs logo green */
+  --color-brand-hover: #45ae2d;     /* brand hover/active (dark mode) */
+
+  /* Primary action fill. #17A673 with white text is only 3.12:1, which fails
+     WCAG AA for a 14px label, so the action role uses the logo green instead.
+     Accent identity is preserved everywhere the accent is not carrying text. */
+  --color-action: #1e8906;          /* white label = 4.53:1 */
+  --color-action-hover: #177a05;    /* white label = 5.49:1 */
+  --color-action-active: #126203;   /* white label = 7.57:1 */
+
+  /* ---- colour: feedback ------------------------------------------------- */
+  --color-warn: #f59e0b;
+  --color-warn-text: #92400e;       /* 7.09:1 on surface, 6.25:1 on warn tint */
+  --color-warn-tint: rgba(245, 158, 11, 0.16);
+  --color-danger: #dc2626;
+  --color-danger-text: #b91c1c;     /* 6.47:1 on surface, 5.37:1 on danger tint */
+  --color-danger-tint: rgba(220, 38, 38, 0.12);
+  --color-danger-ink: #ffffff;      /* 4.83:1 on --color-danger */
+  --color-success: #1e8906;
+  --color-success-text: #0f6e4b;
+  --color-accent-tint: rgba(23, 166, 115, 0.14);
+  --color-neutral-tint: rgba(20, 23, 28, 0.06);
+
+  /* ---- focus ------------------------------------------------------------ */
+  /* 5.99:1 vs canvas, 6.26:1 vs surface. Always paired with outline-offset so
+     the ring is measured against the page, never against the control fill. */
+  --color-focus-ring: #0f6e4b;
+
+  /* ---- skeleton --------------------------------------------------------- */
+  --color-skeleton: rgba(20, 23, 28, 0.07);
+  --color-skeleton-strong: rgba(20, 23, 28, 0.11);
+  --color-skeleton-sheen: rgba(255, 255, 255, 0.55);
+
+  /* ---- ambient field (Active Theory surface, restrained) ---------------- */
+  --ambient-glow-1: rgba(23, 166, 115, 0.20);
+  --ambient-glow-2: rgba(30, 137, 6, 0.13);
+  --ambient-glow-3: rgba(133, 228, 107, 0.13);
+  --ambient-field: rgba(20, 23, 28, 0.05);
+  --ambient-vignette: rgba(20, 23, 28, 0.04);
+
+  /* ---- surface / elevation ---------------------------------------------- */
+  --surface-1: var(--color-surface);
+  --surface-2: var(--color-surface-2);
+  --surface-3: var(--color-surface-3);
+  --elev-1: 0 1px 2px rgba(20, 23, 28, 0.05), 0 1px 1px rgba(20, 23, 28, 0.04);
+  --elev-2: 0 2px 4px rgba(20, 23, 28, 0.06), 0 6px 12px rgba(20, 23, 28, 0.06);
+  --elev-3: 0 8px 24px rgba(20, 23, 28, 0.1), 0 2px 6px rgba(20, 23, 28, 0.06);
+
+  /* ---- glass (floating panels) ------------------------------------------ */
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(20, 23, 28, 0.08);
+  --glass-blur: 16px;
+  --glass-saturate: 160%;
+
+  /* ---- radius ----------------------------------------------------------- */
+  /* Semantic aliases over Tailwind's numeric scale (see tailwind.preset.js). */
+  --radius-control: 12px;           /* buttons, inputs, list rows */
+  --radius-card: 16px;              /* cards, tables, panels */
+  --radius-sheet: 20px;             /* overlays, modals */
+  --radius-chip: 9999px;            /* badges, pills */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+  --radius-full: 9999px;
+
+  /* ---- spacing (4px base — same grid as Tailwind's numeric scale) -------- */
+  --space-0: 0px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ---- blur ------------------------------------------------------------- */
+  --blur-xs: 4px;
+  --blur-sm: 8px;
+  --blur-md: 16px;
+  --blur-lg: 24px;
+  --blur-glass: var(--blur-md);
+
+  /* ======================================================================
+     MOTION TOKENS  (spec §7 — brevity is the contract: nothing here is
+     longer than 300ms, and page transitions are faster still)
+     ====================================================================== */
+
+  /* ---- durations --------------------------------------------------------- */
+  --dur-instant: 90ms;   /* state echo: press feedback, checkbox tick */
+  --dur-fast: 150ms;     /* hover in/out, colour crossfades, focus ring */
+  --dur-base: 200ms;     /* default: panels, badges, toast enter */
+  --dur-slow: 300ms;     /* largest reveal: sheet/overlay, checkmark morph */
+  --dur-page: 240ms;     /* page cross-fade (spec §7: 150–250ms) */
+
+  /* ---- easings ----------------------------------------------------------- */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);     /* default for UI state */
+  --ease-entrance: cubic-bezier(0.16, 1, 0.3, 1);  /* things arriving */
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);         /* things leaving */
+
+  /* ---- springs (numbers mirror packages/ui/src/motion-tokens.ts) --------- */
+  --spring-default-stiffness: 180;   /* cards, hover lift, layout indicator */
+  --spring-default-damping: 26;
+  --spring-snappy-stiffness: 320;    /* press / press-release */
+  --spring-snappy-damping: 30;
+  --spring-ambient-stiffness: 120;   /* pointer-follow, ambient field */
+  --spring-ambient-damping: 20;
+
+  /* ---- stagger ----------------------------------------------------------- */
+  /* One gesture per list, never per item. See MOTION.md. */
+  --stagger-step: 30ms;   /* delay added per list index */
+  --stagger-max: 6;       /* index cap — 7th item onward shares the 180ms slot */
+}
+
+/* --------------------------------------------------------------------------
+   2. DARK — explicit `.dark` class (matches tailwind darkMode: 'class')
+   -------------------------------------------------------------------------- */
+.dark {
+  color-scheme: dark;
+
+  --color-canvas: #101210;
+  --color-surface: #171917;
+  --color-surface-2: #1d201d;
+  --color-surface-3: #242824;
+
+  --color-ink: #ecefef;             /* 15.29:1 on surface (spec §7) */
+  --color-ink-muted: #a8b0ae;       /*  7.99:1 on surface */
+  --color-ink-subtle: #9aa3a0;      /*  6.84:1 on surface, 5.78:1 on surface-3 */
+  --color-ink-on-action: #101210;   /*  6.04:1 on --color-action (dark mode) */
+
+  --color-border: rgba(236, 239, 239, 0.12);
+  --color-border-strong: rgba(236, 239, 239, 0.28);
+  --color-border-input: rgba(236, 239, 239, 0.46); /* 4.15:1 on surface */
+
+  /* On a dark canvas the accent can carry text again, so the bright accent
+     takes over the text role and the action fill gets brighter on hover. */
+  --color-accent-text: #85e46b;     /* 11.2:1 on surface */
+  --color-action: #17a673;          /* dark ink label = 6.04:1 */
+  --color-action-hover: #45ae2d;    /* dark ink label = 6.58:1 */
+  --color-action-active: #85e46b;   /* dark ink label = 11.92:1 */
+
+  --color-warn-text: #fcd34d;       /* 12.26:1 on surface, 8.37:1 on warn tint */
+  --color-danger-text: #fca5a5;     /*  9.31:1 on surface, 7.98:1 on danger tint */
+  --color-success-text: #85e46b;
+  --color-accent-tint: rgba(23, 166, 115, 0.2);
+  --color-neutral-tint: rgba(236, 239, 239, 0.08);
+
+  --color-focus-ring: #85e46b;      /* 11.2:1 vs surface */
+
+  --color-skeleton: rgba(236, 239, 239, 0.08);
+  --color-skeleton-strong: rgba(236, 239, 239, 0.13);
+  --color-skeleton-sheen: rgba(255, 255, 255, 0.09);
+
+    --ambient-glow-1: rgba(23, 166, 115, 0.26);
+    --ambient-glow-2: rgba(69, 174, 45, 0.16);
+    --ambient-glow-3: rgba(133, 228, 107, 0.13);
+    --ambient-field: rgba(236, 239, 239, 0.05);
+    --ambient-vignette: rgba(0, 0, 0, 0.25);
+
+  --color-skeleton: rgba(236, 239, 239, 0.08);
+  --color-skeleton-strong: rgba(236, 239, 239, 0.13);
+  --color-skeleton-sheen: rgba(255, 255, 255, 0.09);
+
+    --ambient-glow-1: rgba(23, 166, 115, 0.26);
+    --ambient-glow-2: rgba(69, 174, 45, 0.16);
+    --ambient-glow-3: rgba(133, 228, 107, 0.13);
+    --ambient-field: rgba(236, 239, 239, 0.05);
+    --ambient-vignette: rgba(0, 0, 0, 0.25);
+
+  --elev-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --elev-2: 0 2px 8px rgba(0, 0, 0, 0.55);
+  --elev-3: 0 12px 32px rgba(0, 0, 0, 0.6);
+
+  --glass-bg: rgba(23, 25, 23, 0.68);
+  --glass-border: rgba(236, 239, 239, 0.1);
+}
+
+/* --------------------------------------------------------------------------
+   3. DARK — follow the OS when no explicit theme class is present.
+   `:root:not(.light)` lets an explicit .light opt-out win.
+   NOTE: this block intentionally repeats the `.dark` values. Plain CSS cannot
+   share declarations across a class selector and a media query, and a JS
+   theme bootstrap is out of scope for this pass. Keep the two in sync.
+   -------------------------------------------------------------------------- */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    color-scheme: dark;
+
+    --color-canvas: #101210;
+    --color-surface: #171917;
+    --color-surface-2: #1d201d;
+    --color-surface-3: #242824;
+
+    --color-ink: #ecefef;
+    --color-ink-muted: #a8b0ae;
+    --color-ink-subtle: #9aa3a0;
+    --color-ink-on-action: #101210;
+
+    --color-border: rgba(236, 239, 239, 0.12);
+    --color-border-strong: rgba(236, 239, 239, 0.28);
+    --color-border-input: rgba(236, 239, 239, 0.46);
+
+    --color-accent-text: #85e46b;
+    --color-action: #17a673;
+    --color-action-hover: #45ae2d;
+    --color-action-active: #85e46b;
+
+    --color-warn-text: #fcd34d;
+    --color-danger-text: #fca5a5;
+    --color-success-text: #85e46b;
+    --color-accent-tint: rgba(23, 166, 115, 0.2);
+    --color-neutral-tint: rgba(236, 239, 239, 0.08);
+
+    --color-focus-ring: #85e46b;
+
+    --elev-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --elev-2: 0 2px 8px rgba(0, 0, 0, 0.55);
+    --elev-3: 0 12px 32px rgba(0, 0, 0, 0.6);
+
+    --glass-bg: rgba(23, 25, 23, 0.68);
+    --glass-border: rgba(236, 239, 239, 0.1);
+  }
+}

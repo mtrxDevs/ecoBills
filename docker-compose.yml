@@ -1,0 +1,26 @@
+version: "3.9"
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ecobills
+      POSTGRES_PASSWORD: ecobills
+      POSTGRES_DB: ecobills
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  api:
+    build: ./services/api
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgresql://ecobills:ecobills@db:5432/ecobills?schema=public
+      API_PORT: 3001
+    ports:
+      - "3001:3001"
+
+volumes:
+  pgdata:
