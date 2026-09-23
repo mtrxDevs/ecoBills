@@ -6,6 +6,7 @@ import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import fastifyStatic from '@fastify/static'
 import { authRoutes } from './routes/auth.js'
+import { customerRoutes } from './routes/customers.js'
 import { inventoryRoutes } from './routes/inventory.js'
 import { salesRoutes } from './routes/sales.js'
 import { purchasingRoutes } from './routes/purchasing.js'
@@ -38,6 +39,7 @@ export async function buildApp(opts: { logger?: boolean } = {}): Promise<Fastify
 
 
   await app.register(authRoutes, { prefix: '/api' })
+  await app.register(customerRoutes, { prefix: '/api' })
   await app.register(inventoryRoutes, { prefix: '/api' })
   await app.register(salesRoutes, { prefix: '/api' })
   await app.register(purchasingRoutes, { prefix: '/api' })

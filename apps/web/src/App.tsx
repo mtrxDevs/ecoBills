@@ -8,6 +8,8 @@ import { Login, Start } from './screens/Auth'
 import { Dashboard } from './screens/Dashboard'
 import { Inventory } from './screens/Inventory'
 import { Billing } from './screens/Billing'
+import { Customers } from './screens/Customers'
+import { CustomerDetail } from './screens/CustomerDetail'
 import { Orders } from './screens/Orders'
 import { Reports } from './screens/Reports'
 import { Settings } from './screens/Settings'
@@ -93,6 +95,8 @@ export function App() {
                       <Route path="/" element={<Guard><Dashboard /></Guard>} />
                       <Route path="/inventory" element={<Guard><Inventory /></Guard>} />
                       <Route path="/billing" element={<Guard><Billing /></Guard>} />
+                      <Route path="/customers" element={<Guard><Customers /></Guard>} />
+                      <Route path="/customers/:id" element={<Guard><CustomerDetail /></Guard>} />
                       <Route path="/orders" element={<Guard><Orders /></Guard>} />
                       <Route path="/reports" element={<Guard><Reports /></Guard>} />
                       <Route path="/settings" element={<Guard><Settings /></Guard>} />

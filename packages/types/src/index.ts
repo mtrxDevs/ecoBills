@@ -53,6 +53,22 @@ export const customerSchema = z.object({
   gstin: z.string().max(15).optional().nullable(),
   state: z.string().max(80).default(''),
   address: z.string().max(500).default(''),
+  paymentTermsDays: z.number().int().min(0).max(365).default(0),
+  isActive: z.boolean().default(true),
+  notes: z.string().max(1000).default(''),
+})
+
+// Paginated list query. pageSize caps at 100 — list endpoints never dump a table.
+export const customerQuerySchema = z.object({
+  q: z.string().max(120).default(''),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  active: z.enum(['all', 'active', 'inactive']).default('all'),
+})
+
+export const pageQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
 })
 
 export const supplierSchema = z.object({

@@ -47,7 +47,7 @@ describe.runIf(hasDb)('api integration (live postgres)', () => {
 
   type Jar = { cookie: string }
   async function call(
-    method: 'GET' | 'POST' | 'PATCH',
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     path: string,
     opts: { body?: unknown; jar?: Jar } = {},
   ) {
@@ -505,6 +505,152 @@ describe.runIf(hasDb)('api integration (live postgres)', () => {
     expect(pnl2.json.cogs).toBe(0)
     expect(pnl2.json.grossProfit).toBe(0)
     expect(pnl2.json.outputGst).toBe(0)
+  })
+
+  // ---------- Milestone 1: Customers ----------
+
+  async function mkCustomer(jar: Jar, overrides: Record<string, unknown> = {}) {
+    const r = await call('POST', '/api/customers', {
+      body: { name: `M1 Cust ${Date.now()}-${Math.floor(Math.random() * 1e6)}`, phone: '98200 00000', state: 'Maharashtra', ...overrides },
+      jar,
+    })
+    expect(r.status).toBe(200)
+    return r.json
+  }
+
+  async function mkStockedItem(jar: Jar, qty = 50) {
+    const r = await call('POST', '/api/items', {
+      body: { name: 'M1 Item', sku: `M1I-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, salePrice: 10000, costPrice: 6000, taxRateBps: 1800 },
+      jar,
+    })
+    expect(r.status).toBe(200)
+    const a = await call('POST', '/api/stock/adjust', { body: { itemId: r.json.id, deltaQty: qty, note: 'opening' }, jar })
+    expect(a.status).toBe(200)
+    return r.json
+  }
+
+  it('customers: business B sees nothing of business A', async () => {
+    const a = await signupBusiness(email('custa'))
+    const b = await signupBusiness(email('custb'))
+    const c = await mkCustomer(a.jar)
+    for (const path of [
+      `/api/customers/${c.id}`,
+      `/api/customers/${c.id}/invoices`,
+      `/api/customers/${c.id}/payments`,
+      `/api/customers/${c.id}/statement`,
+      `/api/customers/${c.id}/balance`,
+    ]) {
+      expect((await call('GET', path, { jar: b.jar })).status, path).toBe(404)
+    }
+    expect((await call('PATCH', `/api/customers/${c.id}`, { body: { name: 'Hijacked' }, jar: b.jar })).status).toBe(404)
+    expect((await call('DELETE', `/api/customers/${c.id}`, { jar: b.jar })).status).toBe(404)
+  })
+
+  it('customers: paginated list, search, and delete guards', async () => {
+    const { jar } = await signupBusiness(email('custpage'))
+    for (let i = 0; i < 25; i++) await mkCustomer(jar, { name: `M1 Page ${i}` })
+    const p1 = await call('GET', '/api/customers?q=M1%20Page&page=1&pageSize=20', { jar })
+    expect(p1.status).toBe(200)
+    expect(p1.json.total).toBe(25)
+    expect(p1.json.data.length).toBe(20)
+    expect(p1.json.totalPages).toBe(2)
+    const p2 = await call('GET', '/api/customers?q=M1%20Page&page=2&pageSize=20', { jar })
+    expect(p2.json.data.length).toBe(5)
+    const one = await call('GET', '/api/customers?q=M1%20Page%201&pageSize=20', { jar })
+    expect(one.json.total).toBeGreaterThanOrEqual(1)
+    expect(one.json.total).toBeLessThan(25)
+
+    // staff can create + edit (matrix), but only owners delete
+    const staffAddr = email('custstaff')
+    await call('POST', '/api/users', { body: { name: 'S', email: staffAddr, password: 'password123', role: 'staff' }, jar })
+    const login = await call('POST', '/api/auth/login', { body: { email: staffAddr, password: 'password123' } })
+    const v = await call('POST', '/api/auth/verify-email', { body: { challengeToken: login.json.challengeToken, code: lastCodeFor(staffAddr) } })
+    const staffJar = v.jar as Jar
+    const created = await call('POST', '/api/customers', { body: { name: 'M1 Staff Made', state: 'Karnataka' }, jar: staffJar })
+    expect(created.status).toBe(200)
+    expect((await call('PATCH', `/api/customers/${created.json.id}`, { body: { phone: '911' }, jar: staffJar })).status).toBe(200)
+    expect((await call('DELETE', `/api/customers/${created.json.id}`, { jar: staffJar })).status).toBe(403)
+
+    // owner cannot delete a customer with invoices — deactivate instead
+    const busy = await mkCustomer(jar)
+    const item = await mkStockedItem(jar)
+    const inv = await call('POST', '/api/invoices', { body: { customerId: busy.id, lines: [{ itemId: item.id, qty: 1 }] }, jar })
+    expect(inv.status).toBe(200)
+    expect((await call('DELETE', `/api/customers/${busy.id}`, { jar })).status).toBe(409)
+    expect((await call('PATCH', `/api/customers/${busy.id}`, { body: { isActive: false }, jar })).status).toBe(200)
+    // clean customer deletes fine
+    expect((await call('DELETE', `/api/customers/${created.json.id}`, { jar })).status).toBe(200)
+    expect((await call('GET', `/api/customers/${created.json.id}`, { jar })).status).toBe(404)
+  })
+
+  it('customers: statement invoice → payment → payment → credit = correct running balance', async () => {
+    const { jar } = await signupBusiness(email('custstmt'))
+    const c = await mkCustomer(jar, { paymentTermsDays: 7 })
+    const item = await mkStockedItem(jar, 50)
+    const inv = await call('POST', '/api/invoices', { body: { customerId: c.id, lines: [{ itemId: item.id, qty: 1 }] }, jar })
+    expect(inv.status).toBe(200)
+    // 1 × ₹100 @ 18% = 10000 + 1800 = 11800
+    expect(inv.json.grandTotal).toBe(11800)
+    // due date honors payment terms
+    const due = new Date(inv.json.dueDate).getTime()
+    const issue = new Date(inv.json.issueDate).getTime()
+    expect(Math.round((due - issue) / 86400e3)).toBe(7)
+    // bill-to snapshot frozen at creation
+    expect(inv.json.billToName).toBe(c.name)
+
+    await call('POST', `/api/invoices/${inv.json.id}/payments`, { body: { amount: 4000, method: 'cash' }, jar })
+    await call('POST', `/api/invoices/${inv.json.id}/payments`, { body: { amount: 2000, method: 'upi' }, jar })
+    await call('POST', `/api/invoices/${inv.json.id}/credit-notes`, { body: { reason: 'm1', lines: [{ itemId: item.id, qty: 1 }] }, jar })
+
+    const bal = await call('GET', `/api/customers/${c.id}/balance`, { jar })
+    expect(bal.status).toBe(200)
+    expect(bal.json.totalSales).toBe(11800)
+    expect(bal.json.totalPaid).toBe(6000)
+    expect(bal.json.creditTotal).toBe(11800)
+    expect(bal.json.outstanding).toBe(11800 - 6000 - 11800)
+
+    const stmt = await call('GET', `/api/customers/${c.id}/statement?pageSize=100`, { jar })
+    expect(stmt.status).toBe(200)
+    expect(stmt.json.balance).toBe(11800 - 6000 - 11800)
+    const kinds = stmt.json.data.map((e: any) => e.kind)
+    expect(kinds).toContain('invoice')
+    expect(kinds.filter((k: string) => k === 'payment').length).toBe(2)
+    expect(kinds).toContain('credit_note')
+    // running balance reconciles entry by entry
+    let running = 0
+    for (const e of stmt.json.data) {
+      running += e.debit - e.credit
+      expect(e.balance).toBe(running)
+    }
+  })
+
+  it('customers: empty customer renders zeroed aggregates', async () => {
+    const { jar } = await signupBusiness(email('custempty'))
+    const c = await mkCustomer(jar)
+    const bal = await call('GET', `/api/customers/${c.id}/balance`, { jar })
+    expect(bal.json).toMatchObject({ totalSales: 0, totalPaid: 0, creditTotal: 0, outstanding: 0, invoiceCount: 0 })
+    const stmt = await call('GET', `/api/customers/${c.id}/statement`, { jar })
+    expect(stmt.json.data).toEqual([])
+    expect(stmt.json.balance).toBe(0)
+    const detail = await call('GET', `/api/customers/${c.id}`, { jar })
+    expect(detail.json.stats.outstanding).toBe(0)
+  })
+
+  it('customers: editing the record never rewrites old invoices', async () => {
+    const { jar } = await signupBusiness(email('custhist'))
+    const c = await mkCustomer(jar, { name: 'Original Name', gstin: '27AAAAA0000A1Z5' })
+    const item = await mkStockedItem(jar)
+    const inv = await call('POST', '/api/invoices', { body: { customerId: c.id, lines: [{ itemId: item.id, qty: 1 }] }, jar })
+    expect(inv.json.billToName).toBe('Original Name')
+    await call('PATCH', `/api/customers/${c.id}`, { body: { name: 'Renamed Ltd', gstin: '27BBBBB0000B1Z5', address: 'New Address' }, jar })
+    const reopened = await call('GET', `/api/invoices/${inv.json.id}`, { jar })
+    expect(reopened.json.billToName).toBe('Original Name')
+    expect(reopened.json.billToGstin).toBe('27AAAAA0000A1Z5')
+    expect(reopened.json.grandTotal).toBe(inv.json.grandTotal)
+    // Snapshots are stable; the detail endpoint joins the live item row for
+    // display, so compare the financial snapshot fields, not the join shape.
+    const snap = (ls: any[]) => ls.map((l) => ({ itemId: l.itemId, qty: String(l.qty), unitPriceSnapshot: l.unitPriceSnapshot, unitCostSnapshot: l.unitCostSnapshot, taxRateSnapshotBps: l.taxRateSnapshotBps }))
+    expect(snap(reopened.json.lines)).toEqual(snap(inv.json.lines))
   })
 })
 

@@ -163,12 +163,18 @@ model Customer {
   gstin      String?
   state      String   @default("")
   address    String   @default("")
+  // Net payment terms in days: invoice dueDate defaults to issueDate + terms.
+  paymentTermsDays Int @default(0)
+  isActive   Boolean  @default(true)
+  notes      String   @default("")
   createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   invoices   Invoice[]
   quotations Quotation[]
 
   @@index([businessId])
+  @@index([businessId, name])
 }
 
 model Supplier {
@@ -257,6 +263,14 @@ model Invoice {
   issueDate          DateTime      @default(now())
   dueDate            DateTime?
   notes              String        @default("")
+  // Bill-to snapshot: who the invoice was made out to, frozen at creation.
+  // Old documents must not change when the customer record is edited later;
+  // readers prefer these fields and fall back to the live customer only when
+  // null (walk-ins and pre-snapshot invoices).
+  billToName         String?
+  billToGstin        String?
+  billToAddress      String?
+  billToState        String?
   subtotal           Int           @default(0)
   taxTotal           Int           @default(0)
   grandTotal         Int           @default(0)

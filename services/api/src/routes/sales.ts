@@ -3,22 +3,9 @@ import { prisma } from '../db.js'
 import { requireAuth, requirePerm } from '../auth.js'
 import { audit } from '../audit.js'
 import { financialYear, invoiceNumber, lineTotals, gstSplit } from '../money.js'
-import { customerSchema, createInvoiceSchema, recordPaymentSchema, createCreditNoteSchema } from '@ecobills/types'
+import { createInvoiceSchema, recordPaymentSchema, createCreditNoteSchema } from '@ecobills/types'
 
 export async function salesRoutes(app: FastifyInstance) {
-  app.get('/customers', { preHandler: requireAuth }, async (req) => {
-    return prisma.customer.findMany({ where: { businessId: req.user!.businessId }, orderBy: { name: 'asc' } })
-  })
-  app.post('/customers', { preHandler: requirePerm('inventory.manage') }, async (req) => {
-    const b = customerSchema.parse(req.body)
-    return prisma.customer.create({ data: { ...b, email: b.email || null, gstin: b.gstin || null, businessId: req.user!.businessId } })
-  })
-  app.patch('/customers/:id', { preHandler: requirePerm('inventory.manage') }, async (req) => {
-    const b = customerSchema.partial().parse(req.body)
-    await prisma.customer.updateMany({ where: { id: (req.params as any).id, businessId: req.user!.businessId }, data: b })
-    return { ok: true }
-  })
-
   // ---- invoices ----
   app.get('/invoices', { preHandler: requireAuth }, async (req) => {
     const list = await prisma.invoice.findMany({
@@ -110,6 +97,10 @@ export async function salesRoutes(app: FastifyInstance) {
       const next = taken[0]?.n
       if (!next) throw Object.assign(new Error('counter_failed'), { statusCode: 500 })
       const num = invoiceNumber(business.invoicePrefix || 'INV', fy, next)
+      const issuedAt = b.issueDate ? new Date(b.issueDate) : new Date()
+      // Due date from the customer's terms (walk-ins: none). Bill-to identity
+      // is snapshotted so later edits to the customer never rewrite history.
+      const dueAt = customer ? new Date(issuedAt.getTime() + (customer.paymentTermsDays || 0) * 86400e3) : null
       const inv = await tx.invoice.create({
         data: {
           businessId: bid,
@@ -117,7 +108,12 @@ export async function salesRoutes(app: FastifyInstance) {
           invoiceNumber: num,
           placeOfSupplyState: place,
           status: 'unpaid',
-          issueDate: b.issueDate ? new Date(b.issueDate) : new Date(),
+          issueDate: issuedAt,
+          dueDate: dueAt,
+          billToName: customer?.name ?? null,
+          billToGstin: customer?.gstin ?? null,
+          billToAddress: customer?.address ?? null,
+          billToState: customer?.state ?? null,
           subtotal, taxTotal, grandTotal: subtotal + taxTotal,
           lines: {
             create: resolved.map((r) => ({
@@ -412,7 +408,7 @@ export async function salesRoutes(app: FastifyInstance) {
     const html = await renderInvoicePdfHtml({
       businessName: inv.business.name, businessAddress: inv.business.address, gstin: inv.business.gstin,
       invoiceNumber: inv.invoiceNumber, issueDate: inv.issueDate.toISOString().slice(0, 10),
-      customerName: inv.customer?.name || 'Walk-in',
+      customerName: inv.billToName || inv.customer?.name || 'Walk-in',
       lines: inv.lines.map((l) => ({ name: l.item.name, qty: String(l.qty), price: fmt(l.unitPriceSnapshot), tax: fmt(Math.round((Number(l.qty) * l.unitPriceSnapshot * l.taxRateSnapshotBps) / 10000)), total: fmt(Math.round(Number(l.qty) * l.unitPriceSnapshot * (1 + l.taxRateSnapshotBps / 10000))) })),
       subtotal: fmt(inv.subtotal), taxTotal: fmt(inv.taxTotal), grandTotal: fmt(inv.grandTotal),
       gstNote: inv.business.gstin ? ((inv.placeOfSupplyState || inv.business.state) === inv.business.state ? 'CGST + SGST as applicable.' : 'IGST as applicable.') : 'Non-GST bill (business below registration threshold).',
