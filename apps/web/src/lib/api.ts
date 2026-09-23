@@ -44,6 +44,16 @@ const FRIENDLY: Record<string, string> = {
   unauthorized: 'Your session expired. Log in again.',
   database_unavailable: 'Cannot reach the database. Is the API running?',
   validation: 'Some fields need attention.',
+  insufficient_stock: 'Not enough stock for that sale.',
+  credit_exceeds_remaining: 'That return is more than what is left to return.',
+  receipt_exceeds_ordered: 'Received quantity is more than ordered.',
+  receipt_decrease_rejected: 'Received quantity cannot be lowered once recorded.',
+  item_not_on_invoice: 'That item is not on the original invoice.',
+  not_receivable: 'That order cannot be received in its current state.',
+  unknown_line: 'An order line was not recognized.',
+  // Server codes arrive in mixed case (legacy lowercase, newer UPPER_SNAKE);
+  // the lookup below lowercases, so both read friendly. Full code
+  // standardization is tracked as Phase-A API consistency work.
 }
 
 async function req(path: string, opts: RequestInit = {}) {
@@ -65,13 +75,16 @@ async function req(path: string, opts: RequestInit = {}) {
   if (!res.ok) {
     const t = await res.text()
     let code = `http_${res.status}`
+    let serverMessage: string | undefined
     try {
       const j = JSON.parse(t)
       if (j && typeof j.error === 'string') code = j.error
+      if (j && typeof j.message === 'string') serverMessage = j.message
     } catch {
       /* non-JSON error page — keep the http_ fallback */
     }
-    throw new ApiError(res.status, code, FRIENDLY[code] || `Something went wrong (${code}).`)
+    const key = code.toLowerCase()
+    throw new ApiError(res.status, code, FRIENDLY[key] || serverMessage || `Something went wrong (${code}).`)
   }
   const ct = res.headers.get('content-type') || ''
   if (ct.includes('application/json')) return res.json()

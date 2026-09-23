@@ -22,7 +22,25 @@ describe('money: integer math, no float drift', () => {
   it('sumLines aggregates', () => {
     expect(sumLines([{ qty: 1, unitPrice: 10000, taxBps: 1800 }])).toEqual({ subtotal: 10000, taxTotal: 1800, grandTotal: 11800 })
   })
+  it('GST slabs compute taxable vs tax distinctly across 0%, 5%, 12%, 18%, 28%', () => {
+    // ₹10,000 base taxable amount
+    const base = 1000000
+    const slabs = [
+      { bps: 0, expectedTax: 0 },
+      { bps: 500, expectedTax: 50000 },
+      { bps: 1200, expectedTax: 120000 },
+      { bps: 1800, expectedTax: 180000 },
+      { bps: 2800, expectedTax: 280000 },
+    ]
+    for (const slab of slabs) {
+      const res = lineTotals(1, base, slab.bps)
+      expect(res.subtotal).toBe(base)
+      expect(res.tax).toBe(slab.expectedTax)
+      expect(res.total).toBe(base + slab.expectedTax)
+    }
+  })
 })
+
 
 describe('po template: deterministic, zero deps', () => {
   it('renders without AI', () => {

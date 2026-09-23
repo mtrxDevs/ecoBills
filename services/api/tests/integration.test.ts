@@ -170,10 +170,12 @@ describe.runIf(hasDb)('api integration (live postgres)', () => {
       jar: a.jar,
     })
     expect(item.status).toBe(200)
+    await call('POST', '/api/stock/adjust', { body: { itemId: item.json.id, deltaQty: 10, note: 'opening' }, jar: a.jar })
     const inv = await call('POST', '/api/invoices', {
       body: { customerId: null, lines: [{ itemId: item.json.id, qty: 1 }] },
       jar: a.jar,
     })
+
     expect(inv.status).toBe(200)
     // B reads A's invoice → 404, not 403 (no existence leak)
     expect((await call('GET', `/api/invoices/${inv.json.id}`, { jar: b.jar })).status).toBe(404)
@@ -268,4 +270,241 @@ describe.runIf(hasDb)('api integration (live postgres)', () => {
     const seqs = numbers.map((n: string) => Number(n.split('-').pop())).sort((a, b) => a - b)
     for (let i = 1; i < seqs.length; i++) expect(seqs[i] - seqs[i - 1]).toBe(1)
   })
+
+  it('payment concurrency: two simultaneous payments never overpay', async () => {
+    const { jar } = await signupBusiness(email('payrace'))
+    const item = await call('POST', '/api/items', {
+      body: { name: 'M0 PayRace Item', sku: `M0PR-${Date.now()}`, salePrice: 10000, costPrice: 5000, taxRateBps: 0 },
+      jar,
+    })
+    await call('POST', '/api/stock/adjust', { body: { itemId: item.json.id, deltaQty: 50, note: 'opening' }, jar })
+    const inv = await call('POST', '/api/invoices', {
+      body: { customerId: null, lines: [{ itemId: item.json.id, qty: 1 }] },
+      jar,
+    })
+    expect(inv.status).toBe(200)
+    expect(inv.json.grandTotal).toBe(10000)
+
+    // Simultaneously submit two payments of ₹70.00 (7000 paise) on a ₹100.00 (10000 paise) bill
+    const [p1, p2] = await Promise.all([
+      call('POST', `/api/invoices/${inv.json.id}/payments`, { body: { amount: 7000, method: 'upi' }, jar }),
+      call('POST', `/api/invoices/${inv.json.id}/payments`, { body: { amount: 7000, method: 'upi' }, jar }),
+    ])
+
+    const statuses = [p1.status, p2.status].sort((a, b) => a - b)
+    expect(statuses, 'one payment must succeed and one must be rejected for overpayment').toEqual([200, 400])
+
+    const failed = p1.status === 400 ? p1 : p2
+    expect(failed.json.error).toBe('overpayment')
+
+    // Verify invoice amountPaid never exceeds grandTotal
+    const fresh = await call('GET', `/api/invoices/${inv.json.id}`, { jar })
+    expect(fresh.json.amountPaid).toBe(7000)
+    expect(fresh.json.status).toBe('partial')
+
+    // Subsequent payment for remaining balance (3000 paise) succeeds
+    const p3 = await call('POST', `/api/invoices/${inv.json.id}/payments`, { body: { amount: 3000, method: 'cash' }, jar })
+    expect(p3.status).toBe(200)
+
+    const completed = await call('GET', `/api/invoices/${inv.json.id}`, { jar })
+    expect(completed.json.amountPaid).toBe(10000)
+    expect(completed.json.status).toBe('paid')
+  })
+
+  it('credit note over-return protection: enforces returnable = original - credited', async () => {
+    const { jar } = await signupBusiness(email('cnreturn'))
+    const item = await call('POST', '/api/items', {
+      body: { name: 'M0 CN Item', sku: `M0CN-${Date.now()}`, salePrice: 2000, costPrice: 1000, taxRateBps: 0 },
+      jar,
+    })
+    await call('POST', '/api/stock/adjust', { body: { itemId: item.json.id, deltaQty: 50, note: 'opening' }, jar })
+    const inv = await call('POST', '/api/invoices', {
+      body: { customerId: null, lines: [{ itemId: item.json.id, qty: 5 }] },
+      jar,
+    })
+    expect(inv.status).toBe(200)
+
+    // 1. Returning 6 units on a 5-unit invoice must be rejected
+    const overReturn = await call('POST', `/api/invoices/${inv.json.id}/credit-notes`, {
+      body: { reason: 'too many', lines: [{ itemId: item.json.id, qty: 6 }] },
+      jar,
+    })
+    expect(overReturn.status).toBe(400)
+    expect(overReturn.json.error).toBe('CREDIT_NOTE_EXCEEDS_REMAINING_QTY')
+
+    // 2. Partial return of 2 units succeeds
+    const cn1 = await call('POST', `/api/invoices/${inv.json.id}/credit-notes`, {
+      body: { reason: 'part 1', lines: [{ itemId: item.json.id, qty: 2 }] },
+      jar,
+    })
+    expect(cn1.status).toBe(200)
+
+    // 3. Attempting another return of 4 units (2 + 4 = 6 > 5) must be rejected
+    const overReturn2 = await call('POST', `/api/invoices/${inv.json.id}/credit-notes`, {
+      body: { reason: 'excess second return', lines: [{ itemId: item.json.id, qty: 4 }] },
+      jar,
+    })
+    expect(overReturn2.status).toBe(400)
+    expect(overReturn2.json.error).toBe('CREDIT_NOTE_EXCEEDS_REMAINING_QTY')
+
+    // 4. Exact remaining return of 3 units succeeds
+    const cn2 = await call('POST', `/api/invoices/${inv.json.id}/credit-notes`, {
+      body: { reason: 'part 2 exact remainder', lines: [{ itemId: item.json.id, qty: 3 }] },
+      jar,
+    })
+    expect(cn2.status).toBe(200)
+
+    // 5. Subsequent return of even 1 unit is now rejected
+    const overReturn3 = await call('POST', `/api/invoices/${inv.json.id}/credit-notes`, {
+      body: { reason: 'exhausted', lines: [{ itemId: item.json.id, qty: 1 }] },
+      jar,
+    })
+    expect(overReturn3.status).toBe(400)
+    expect(overReturn3.json.error).toBe('CREDIT_NOTE_EXCEEDS_REMAINING_QTY')
+  })
+
+  it('purchase receiving protection: prevents over-receive and quantity reduction', async () => {
+    const { jar } = await signupBusiness(email('poreceive'))
+    const sup = await call('POST', '/api/suppliers', {
+      body: { name: 'M0 Test Distributor', contactEmail: 'dist@example.com' },
+      jar,
+    })
+    expect(sup.status).toBe(200)
+    const item = await call('POST', '/api/items', {
+      body: { name: 'M0 PO Item', sku: `M0PO-${Date.now()}`, salePrice: 3000, costPrice: 1500, taxRateBps: 0, primarySupplierId: sup.json.id },
+      jar,
+    })
+    expect(item.status).toBe(200)
+
+    const po = await call('POST', '/api/purchase-orders', {
+      body: { supplierId: sup.json.id, lines: [{ itemId: item.json.id, qtyRequested: 10 }] },
+      jar,
+    })
+    expect(po.status).toBe(200)
+    const poLineId = po.json.lines[0].id
+
+    // Must be sent before receiving
+    const sent = await call('POST', `/api/purchase-orders/${po.json.id}/send`, { jar })
+    expect(sent.status).toBe(200)
+
+    // 1. Attempting to receive 15 units (> 10 requested) must be rejected
+    const overReceive = await call('POST', `/api/purchase-orders/${po.json.id}/receive`, {
+      body: { lines: [{ lineId: poLineId, qtyReceived: 15 }] },
+      jar,
+    })
+    expect(overReceive.status).toBe(400)
+    expect(overReceive.json.error).toBe('PURCHASE_RECEIPT_EXCEEDS_ORDER')
+
+    // 2. Partial receive of 4 units succeeds
+    const recv1 = await call('POST', `/api/purchase-orders/${po.json.id}/receive`, {
+      body: { lines: [{ lineId: poLineId, qtyReceived: 4 }] },
+      jar,
+    })
+    expect(recv1.status).toBe(200)
+    expect(recv1.json.status).toBe('partial')
+
+    // Verify stock increased by exactly 4
+    const items1 = await call('GET', '/api/items', { jar })
+    const it1 = (items1.json as any[]).find((i) => i.id === item.json.id)
+    expect(Number(it1.currentStock)).toBe(4)
+
+    // 3. Decreasing received quantity (e.g. from 4 to 2) must be rejected
+    const reduceReceive = await call('POST', `/api/purchase-orders/${po.json.id}/receive`, {
+      body: { lines: [{ lineId: poLineId, qtyReceived: 2 }] },
+      jar,
+    })
+    expect(reduceReceive.status).toBe(400)
+    expect(reduceReceive.json.error).toBe('CANNOT_DECREASE_RECEIVED_QTY')
+
+    // 4. Exact remaining receive to 10 units succeeds and marks status 'fulfilled'
+    const recv2 = await call('POST', `/api/purchase-orders/${po.json.id}/receive`, {
+      body: { lines: [{ lineId: poLineId, qtyReceived: 10 }] },
+      jar,
+    })
+    expect(recv2.status).toBe(200)
+    expect(recv2.json.status).toBe('fulfilled')
+
+    const items2 = await call('GET', '/api/items', { jar })
+    const it2 = (items2.json as any[]).find((i) => i.id === item.json.id)
+    expect(Number(it2.currentStock)).toBe(10)
+  })
+
+  it('negative stock prevention: rejects sales exceeding available stock', async () => {
+    const { jar } = await signupBusiness(email('negstock'))
+    const item = await call('POST', '/api/items', {
+      body: { name: 'M0 Finite Item', sku: `M0FIN-${Date.now()}`, salePrice: 5000, costPrice: 2500, taxRateBps: 0 },
+      jar,
+    })
+    expect(item.status).toBe(200)
+    // Add exactly 5 units to stock
+    await call('POST', '/api/stock/adjust', { body: { itemId: item.json.id, deltaQty: 5, note: 'opening' }, jar })
+
+    // 1. Attempting to sell 6 units when only 5 exist must be rejected
+    const overSale = await call('POST', '/api/invoices', {
+      body: { customerId: null, lines: [{ itemId: item.json.id, qty: 6 }] },
+      jar,
+    })
+    expect(overSale.status).toBe(400)
+    expect(overSale.json.error).toBe('INSUFFICIENT_STOCK')
+
+    // 2. Concurrent sales: two requests for 3 units each (total 6 > 5)
+    // One must succeed, one must fail with INSUFFICIENT_STOCK. Final stock must be 2 (never negative).
+    const [s1, s2] = await Promise.all([
+      call('POST', '/api/invoices', { body: { customerId: null, lines: [{ itemId: item.json.id, qty: 3 }] }, jar }),
+      call('POST', '/api/invoices', { body: { customerId: null, lines: [{ itemId: item.json.id, qty: 3 }] }, jar }),
+    ])
+    const statuses = [s1.status, s2.status].sort((a, b) => a - b)
+    expect(statuses).toEqual([200, 400])
+
+    const rejected = s1.status === 400 ? s1 : s2
+    expect(rejected.json.error).toBe('INSUFFICIENT_STOCK')
+
+    const items = await call('GET', '/api/items', { jar })
+    const it = (items.json as any[]).find((i) => i.id === item.json.id)
+    expect(Number(it.currentStock)).toBe(2)
+  })
+
+  it('P&L / GST accounting: revenue is taxable sales net of credit notes, Output GST is separate', async () => {
+    const { jar } = await signupBusiness(email('pnlacc'))
+    const item = await call('POST', '/api/items', {
+      body: { name: 'M0 GST Widget', sku: `M0GST-${Date.now()}`, salePrice: 1000000, costPrice: 600000, taxRateBps: 1800 }, // ₹10,000 sale, ₹6,000 cost, 18% GST
+      jar,
+    })
+    await call('POST', '/api/stock/adjust', { body: { itemId: item.json.id, deltaQty: 10, note: 'opening' }, jar })
+
+    // Bill 1 unit: ₹10,000 taxable + ₹1,800 GST = ₹11,800 grandTotal
+    const inv = await call('POST', '/api/invoices', {
+      body: { customerId: null, lines: [{ itemId: item.json.id, qty: 1 }] },
+      jar,
+    })
+    expect(inv.status).toBe(200)
+    expect(inv.json.subtotal).toBe(1000000)
+    expect(inv.json.taxTotal).toBe(180000)
+    expect(inv.json.grandTotal).toBe(1180000)
+
+    const pnl1 = await call('GET', '/api/reports/pnl', { jar })
+    expect(pnl1.status).toBe(200)
+    // Revenue MUST be taxable value (₹10,000), NOT gross total (₹11,800)
+    expect(pnl1.json.revenue).toBe(1000000)
+    expect(pnl1.json.cogs).toBe(600000)
+    expect(pnl1.json.grossProfit).toBe(400000)
+    expect(pnl1.json.outputGst).toBe(180000)
+    expect(pnl1.json.grossInvoiced).toBe(1180000)
+
+    // Issue credit note for return: 1 unit returned
+    const cn = await call('POST', `/api/invoices/${inv.json.id}/credit-notes`, {
+      body: { reason: 'full return', lines: [{ itemId: item.json.id, qty: 1 }] },
+      jar,
+    })
+    expect(cn.status).toBe(200)
+
+    const pnl2 = await call('GET', '/api/reports/pnl', { jar })
+    expect(pnl2.status).toBe(200)
+    // Net revenue, COGS, gross profit, and output GST are now 0 after full return
+    expect(pnl2.json.revenue).toBe(0)
+    expect(pnl2.json.cogs).toBe(0)
+    expect(pnl2.json.grossProfit).toBe(0)
+    expect(pnl2.json.outputGst).toBe(0)
+  })
 })
+

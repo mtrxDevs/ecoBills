@@ -3,12 +3,26 @@
 // with qty scaled to 3 decimals.
 import { createHash } from 'node:crypto'
 
-export function lineTotals(qty: number, unitPricePaise: number, taxBps: number) {
+export function lineTaxable(qty: number, unitPricePaise: number) {
   const qtyMilli = Math.round(qty * 1000) // Decimal(12,3)
-  const subtotal = Math.round((qtyMilli * unitPricePaise) / 1000)
-  const tax = Math.round((subtotal * taxBps) / 10000)
+  return Math.round((qtyMilli * unitPricePaise) / 1000)
+}
+
+export function lineCost(qty: number, unitCostPaise: number) {
+  const qtyMilli = Math.round(qty * 1000)
+  return Math.round((qtyMilli * unitCostPaise) / 1000)
+}
+
+export function lineTax(taxablePaise: number, taxBps: number) {
+  return Math.round((taxablePaise * taxBps) / 10000)
+}
+
+export function lineTotals(qty: number, unitPricePaise: number, taxBps: number) {
+  const subtotal = lineTaxable(qty, unitPricePaise)
+  const tax = lineTax(subtotal, taxBps)
   return { subtotal, tax, total: subtotal + tax }
 }
+
 
 export function sumLines(lines: Array<{ qty: number; unitPrice: number; taxBps: number }>) {
   let subtotal = 0

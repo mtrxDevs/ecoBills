@@ -73,11 +73,13 @@ export function Reports() {
     <div>
       <PageTitle>Profit &amp; loss</PageTitle>
       <PageHint className="mb-4">
-        Accrual basis · net of credit notes · <span className="tnum">{from}</span> → <span className="tnum">{to}</span>
+        Accrual basis · net of credit notes · GST shown separately, not as revenue ·{' '}
+        <span className="tnum">{from}</span> → <span className="tnum">{to}</span>
       </PageHint>
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-        <ReportStat label="Revenue" value={data.revenue} />
+        <ReportStat label="Net sales" value={data.revenue} />
+        <ReportStat label="Output GST" value={data.outputGst || 0} />
         <ReportStat label="COGS" value={data.cogs} />
         <ReportStat label="Gross profit" value={data.grossProfit} />
         <ReportStat label="Net profit" value={data.netProfit} emphasised />

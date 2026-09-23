@@ -31,8 +31,11 @@ export async function buildApp(opts: { logger?: boolean } = {}): Promise<Fastify
       return reply.code(400).send({ error: 'validation', issues: (err as any).issues })
     }
     app.log.error(err)
-    return reply.code(status).send({ error: status === 500 ? 'internal' : (err as any).message || 'error' })
+    const errCode = status === 500 ? 'internal' : (err as any).error || (err as any).message || 'error'
+    const msg = status === 500 ? 'An internal error occurred' : (err as any).messageText || (err as any).message || errCode
+    return reply.code(status).send({ error: errCode, message: msg })
   })
+
 
   await app.register(authRoutes, { prefix: '/api' })
   await app.register(inventoryRoutes, { prefix: '/api' })

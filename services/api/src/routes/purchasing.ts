@@ -132,34 +132,103 @@ export async function purchasingRoutes(app: FastifyInstance) {
   })
 
   // Receiving — owner or staff. Partial + decimal OK. Writes ledger, updates cost going forward.
-  app.post('/purchase-orders/:id/receive', { preHandler: requirePerm('po.receive') }, async (req, reply) => {
+  app.post('/purchase-orders/:id/receive', { preHandler: requirePerm('po.receive') }, async (req) => {
     const b = receivePOSchema.parse(req.body)
-    const po = await prisma.purchaseOrder.findFirst({ where: { id: (req.params as any).id, businessId: req.user!.businessId }, include: { lines: true } })
-    if (!po) return reply.code(404).send({ error: 'not_found' })
-    if (po.status !== 'sent' && po.status !== 'partial') return reply.code(400).send({ error: 'not_receivable' })
-    const byLine = new Map(po.lines.map((l) => [l.id, l]))
-    for (const r of b.lines) {
-      if (!byLine.has(r.lineId)) return reply.code(400).send({ error: 'unknown_line' })
-    }
-    await prisma.$transaction(async (tx) => {
+    const id = (req.params as any).id
+    const bid = req.user!.businessId
+
+    const updatedPO = await prisma.$transaction(async (tx) => {
+      // 1. Lock PO row for update to serialize concurrent receive operations
+      const poRows = await tx.$queryRaw<Array<{ id: string; status: string }>>`
+        SELECT id, status
+        FROM "PurchaseOrder"
+        WHERE id = ${id} AND "businessId" = ${bid}
+        FOR UPDATE
+      `
+      const po = poRows[0]
+      if (!po) throw Object.assign(new Error('not_found'), { statusCode: 404 })
+      if (po.status !== 'sent' && po.status !== 'partial') {
+        throw Object.assign(new Error('not_receivable'), { statusCode: 400 })
+      }
+
+      // 2. Lock and get all lines for this PO
+      const lines = await tx.pOLine.findMany({
+        where: { purchaseOrderId: po.id, businessId: bid },
+      })
+      const byLine = new Map(lines.map((l) => [l.id, l]))
+
+      // 3. Validate lines before applying changes
+      for (const r of b.lines) {
+        const line = byLine.get(r.lineId)
+        if (!line) {
+          throw Object.assign(new Error('unknown_line'), { statusCode: 400 })
+        }
+        const currentReceived = Number(line.qtyReceived)
+        const requested = Number(line.qtyRequested)
+        const newReceived = Number(r.qtyReceived)
+
+        if (newReceived < currentReceived) {
+          throw Object.assign(new Error('CANNOT_DECREASE_RECEIVED_QTY'), {
+            statusCode: 400,
+            messageText: `Received quantity cannot be decreased (current: ${currentReceived}, received: ${newReceived})`,
+          })
+        }
+        if (newReceived > requested) {
+          throw Object.assign(new Error('PURCHASE_RECEIPT_EXCEEDS_ORDER'), {
+            statusCode: 400,
+            messageText: `Received quantity (${newReceived}) exceeds requested quantity (${requested})`,
+          })
+        }
+      }
+
+      // 4. Update lines and stock ledger atomically
       for (const r of b.lines) {
         const line = byLine.get(r.lineId)!
-        const add = Math.max(0, r.qtyReceived - Number(line.qtyReceived))
-        await tx.pOLine.update({ where: { id: line.id }, data: { qtyReceived: r.qtyReceived } })
+        const currentReceived = Number(line.qtyReceived)
+        const newReceived = Number(r.qtyReceived)
+        const add = newReceived - currentReceived
+
         if (add > 0) {
-          await tx.stockLedger.create({ data: { businessId: req.user!.businessId, itemId: line.itemId, deltaQty: add, reason: 'purchase_receipt', refType: 'purchase_order', refId: po.id, createdBy: req.user!.id } })
-          // update going-forward cost if we know a price
+          await tx.pOLine.update({ where: { id: line.id }, data: { qtyReceived: newReceived } })
+          await tx.stockLedger.create({
+            data: {
+              businessId: bid,
+              itemId: line.itemId,
+              deltaQty: add,
+              reason: 'purchase_receipt',
+              refType: 'purchase_order',
+              refId: po.id,
+              createdBy: req.user!.id,
+            },
+          })
           if (line.lastKnownPrice > 0) {
             await tx.item.update({ where: { id: line.itemId }, data: { costPrice: line.lastKnownPrice } })
           }
         }
       }
+
       const fresh = await tx.pOLine.findMany({ where: { purchaseOrderId: po.id } })
       const allDone = fresh.every((l) => Number(l.qtyReceived) >= Number(l.qtyRequested))
       const anyDone = fresh.some((l) => Number(l.qtyReceived) > 0)
-      await tx.purchaseOrder.update({ where: { id: po.id }, data: { status: allDone ? 'fulfilled' : anyDone ? 'partial' : 'sent' } })
+      const nextStatus = allDone ? 'fulfilled' : anyDone ? 'partial' : 'sent'
+      await tx.purchaseOrder.update({ where: { id: po.id }, data: { status: nextStatus } })
+
+      await audit(
+        {
+          businessId: bid,
+          userId: req.user!.id,
+          action: 'po.receive',
+          entity: 'PurchaseOrder',
+          entityId: po.id,
+          after: { lines: b.lines, status: nextStatus },
+        },
+        tx,
+      )
+
+      return tx.purchaseOrder.findUnique({ where: { id: po.id }, include: { lines: true } })
     })
-    await audit({ businessId: req.user!.businessId, userId: req.user!.id, action: 'po.receive', entity: 'PurchaseOrder', entityId: po.id, after: b })
-    return prisma.purchaseOrder.findUnique({ where: { id: po.id }, include: { lines: true } })
+
+    return updatedPO
   })
 }
+

@@ -43,18 +43,19 @@ export async function salesRoutes(app: FastifyInstance) {
 
   app.post('/invoices', { preHandler: requirePerm('invoice.write') }, async (req, reply) => {
     const b = createInvoiceSchema.parse(req.body)
-    const business = await prisma.business.findUniqueOrThrow({ where: { id: req.user!.businessId } })
+    const bid = req.user!.businessId
+    const business = await prisma.business.findUniqueOrThrow({ where: { id: bid } })
 
     let customer = null
     if (b.customerId) {
-      customer = await prisma.customer.findFirst({ where: { id: b.customerId, businessId: req.user!.businessId } })
+      customer = await prisma.customer.findFirst({ where: { id: b.customerId, businessId: bid } })
       if (!customer) return reply.code(404).send({ error: 'customer_not_found' })
     }
     const place = b.placeOfSupplyState || customer?.state || business.state // walk-in defaults same-state
 
     // resolve items + snapshots
-    const ids = [...new Set(b.lines.map((l) => l.itemId))]
-    const items = await prisma.item.findMany({ where: { id: { in: ids }, businessId: req.user!.businessId } })
+    const ids = [...new Set(b.lines.map((l) => l.itemId))].sort()
+    const items = await prisma.item.findMany({ where: { id: { in: ids }, businessId: bid } })
     if (items.length !== ids.length) return reply.code(400).send({ error: 'unknown_item' })
     const byId = new Map(items.map((i) => [i.id, i]))
 
@@ -68,22 +69,50 @@ export async function salesRoutes(app: FastifyInstance) {
     const subtotal = resolved.reduce((s, r) => s + r.subtotal, 0)
     const taxTotal = resolved.reduce((s, r) => s + r.tax, 0)
 
-    // Atomic counter + create (gapless, no MAX()+1 race).
-    // NOTE: this used to be upsert() + SELECT FOR UPDATE + increment, but
-    // Prisma upsert is SELECT-then-INSERT (not atomic): concurrent first
-    // invoices of a year all INSERTed and all but one died with P2002. The
-    // pattern below is atomic at every step — INSERT..ON CONFLICT for the
-    // first row, then a single UPDATE..RETURNING that locks and increments.
     const fy = financialYear(b.issueDate ? new Date(b.issueDate) : new Date())
-    const invoice = await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`INSERT INTO "InvoiceCounter" ("businessId", "financialYear", "lastNumber") VALUES (${req.user!.businessId}, ${fy}, 0) ON CONFLICT DO NOTHING`
-      const taken = await tx.$queryRaw<Array<{ n: number }>>`UPDATE "InvoiceCounter" SET "lastNumber" = "lastNumber" + 1 WHERE "businessId" = ${req.user!.businessId} AND "financialYear" = ${fy} RETURNING "lastNumber" AS "n"`
+    const invoice = await prisma.$transaction(
+      async (tx) => {
+        // 1. Lock item rows in deterministic order to serialize stock checks & prevent overselling
+        await tx.$queryRaw`
+          SELECT id FROM "Item"
+          WHERE id = ANY(${ids}::text[]) AND "businessId" = ${bid}
+          ORDER BY id
+          FOR UPDATE
+        `
+
+        // 2. Sum current stock from StockLedger for these items
+        const sums = await tx.stockLedger.groupBy({
+          by: ['itemId'],
+          where: { businessId: bid, itemId: { in: ids } },
+          _sum: { deltaQty: true },
+        })
+
+      const stockMap = new Map(sums.map((s) => [s.itemId, Number(s._sum.deltaQty || 0)]))
+
+      // 3. Enforce negative-stock prevention policy: available stock >= requested quantity
+      const requestedByItem = new Map<string, number>()
+      for (const r of resolved) {
+        requestedByItem.set(r.itemId, (requestedByItem.get(r.itemId) || 0) + Number(r.qty))
+      }
+      for (const [itemId, reqQty] of requestedByItem.entries()) {
+        const available = stockMap.get(itemId) || 0
+        if (available < reqQty) {
+          throw Object.assign(new Error('INSUFFICIENT_STOCK'), {
+            statusCode: 400,
+            messageText: `Insufficient stock for item "${byId.get(itemId)?.name || itemId}" (available: ${available}, requested: ${reqQty})`,
+          })
+        }
+      }
+
+      // 4. Atomic counter + create invoice (gapless)
+      await tx.$executeRaw`INSERT INTO "InvoiceCounter" ("businessId", "financialYear", "lastNumber") VALUES (${bid}, ${fy}, 0) ON CONFLICT DO NOTHING`
+      const taken = await tx.$queryRaw<Array<{ n: number }>>`UPDATE "InvoiceCounter" SET "lastNumber" = "lastNumber" + 1 WHERE "businessId" = ${bid} AND "financialYear" = ${fy} RETURNING "lastNumber" AS "n"`
       const next = taken[0]?.n
       if (!next) throw Object.assign(new Error('counter_failed'), { statusCode: 500 })
       const num = invoiceNumber(business.invoicePrefix || 'INV', fy, next)
       const inv = await tx.invoice.create({
         data: {
-          businessId: req.user!.businessId,
+          businessId: bid,
           customerId: b.customerId || null,
           invoiceNumber: num,
           placeOfSupplyState: place,
@@ -92,102 +121,288 @@ export async function salesRoutes(app: FastifyInstance) {
           subtotal, taxTotal, grandTotal: subtotal + taxTotal,
           lines: {
             create: resolved.map((r) => ({
-              businessId: req.user!.businessId, itemId: r.itemId, qty: r.qty,
+              businessId: bid, itemId: r.itemId, qty: r.qty,
               unitPriceSnapshot: r.unitPriceSnapshot, unitCostSnapshot: r.unitCostSnapshot, taxRateSnapshotBps: r.taxRateSnapshotBps,
             })),
           },
         },
         include: { lines: true },
       })
-      // stock out (sale)
+      // 5. Stock out (sale)
       for (const r of resolved) {
         await tx.stockLedger.create({
-          data: { businessId: req.user!.businessId, itemId: r.itemId, deltaQty: -r.qty, reason: 'sale', refType: 'invoice', refId: inv.id, createdBy: req.user!.id },
+          data: { businessId: bid, itemId: r.itemId, deltaQty: -r.qty, reason: 'sale', refType: 'invoice', refId: inv.id, createdBy: req.user!.id },
         })
       }
+      // 6. Audit in transaction
+      await audit(
+        {
+          businessId: bid,
+          userId: req.user!.id,
+          action: 'invoice.create',
+          entity: 'Invoice',
+          entityId: inv.id,
+          after: { number: inv.invoiceNumber, grandTotal: inv.grandTotal },
+        },
+        tx,
+      )
       return inv
-    })
+    }, { maxWait: 15000, timeout: 20000 })
 
-    await audit({ businessId: req.user!.businessId, userId: req.user!.id, action: 'invoice.create', entity: 'Invoice', entityId: invoice.id, after: { number: invoice.invoiceNumber, grandTotal: invoice.grandTotal } })
     return invoice
+
   })
 
-  // payments — amount_paid is derived, never stored
+  // payments — amount_paid is derived, never stored; protected by row-level locking
   app.post('/invoices/:id/payments', { preHandler: requirePerm('invoice.write') }, async (req, reply) => {
     const b = recordPaymentSchema.parse(req.body)
-    const inv = await prisma.invoice.findFirst({ where: { id: (req.params as any).id, businessId: req.user!.businessId }, include: { payments: true } })
-    if (!inv) return reply.code(404).send({ error: 'not_found' })
-    if (inv.status === 'void') return reply.code(400).send({ error: 'invoice_void' })
-    const paid = inv.payments.reduce((s, p) => s + p.amount, 0)
-    if (paid + b.amount > inv.grandTotal) return reply.code(400).send({ error: 'overpayment' })
+    const id = (req.params as any).id
+    const bid = req.user!.businessId
+
     let paidAt: Date | undefined
     if (b.paidAt !== undefined) {
       paidAt = new Date(b.paidAt)
       if (Number.isNaN(paidAt.getTime())) return reply.code(400).send({ error: 'validation', message: 'paidAt must be a valid date' })
     }
-    const pay = await prisma.payment.create({
-      data: { businessId: req.user!.businessId, invoiceId: inv.id, amount: b.amount, method: b.method as any, note: b.note, ...(paidAt ? { paidAt } : {}) },
+
+    const pay = await prisma.$transaction(async (tx) => {
+      // 1. Lock invoice row for update in PostgreSQL
+      const rows = await tx.$queryRaw<Array<{ id: string; status: string; grandTotal: number }>>`
+        SELECT id, status, "grandTotal"
+        FROM "Invoice"
+        WHERE id = ${id} AND "businessId" = ${bid}
+        FOR UPDATE
+      `
+      const inv = rows[0]
+      if (!inv) throw Object.assign(new Error('not_found'), { statusCode: 404 })
+      if (inv.status === 'void') throw Object.assign(new Error('invoice_void'), { statusCode: 400 })
+
+      // 2. Sum existing payments inside the lock
+      const sumResult = await tx.payment.aggregate({
+        where: { invoiceId: inv.id, businessId: bid },
+        _sum: { amount: true },
+      })
+      const paid = sumResult._sum.amount || 0
+      if (paid + b.amount > inv.grandTotal) {
+        throw Object.assign(new Error('overpayment'), { statusCode: 400 })
+      }
+
+      const p = await tx.payment.create({
+        data: {
+          businessId: bid,
+          invoiceId: inv.id,
+          amount: b.amount,
+          method: b.method as any,
+          note: b.note,
+          ...(paidAt ? { paidAt } : {}),
+        },
+      })
+
+      const now = paid + b.amount
+      const nextStatus = now >= inv.grandTotal ? 'paid' : now > 0 ? 'partial' : 'unpaid'
+      await tx.invoice.update({
+        where: { id: inv.id },
+        data: { status: nextStatus },
+      })
+
+      await audit(
+        {
+          businessId: bid,
+          userId: req.user!.id,
+          action: 'payment.record',
+          entity: 'Invoice',
+          entityId: inv.id,
+          after: { amount: b.amount, method: b.method, status: nextStatus },
+        },
+        tx,
+      )
+
+      return p
     })
-    const now = paid + b.amount
-    await prisma.invoice.update({ where: { id: inv.id }, data: { status: now >= inv.grandTotal ? 'paid' : now > 0 ? 'partial' : 'unpaid' } })
-    await audit({ businessId: req.user!.businessId, userId: req.user!.id, action: 'payment.record', entity: 'Invoice', entityId: inv.id, after: { amount: b.amount, method: b.method } })
+
     return pay
   })
 
   // void — only when amount_paid = 0
-  app.post('/invoices/:id/void', { preHandler: requirePerm('invoice.void') }, async (req, reply) => {
-    const inv = await prisma.invoice.findFirst({ where: { id: (req.params as any).id, businessId: req.user!.businessId }, include: { payments: true, lines: true } })
-    if (!inv) return reply.code(404).send({ error: 'not_found' })
-    const paid = inv.payments.reduce((s, p) => s + p.amount, 0)
-    if (paid > 0) return reply.code(400).send({ error: 'paid_invoice_cannot_void', message: 'Issue a credit note instead.' })
-    if (inv.status === 'void') return { ok: true }
+  app.post('/invoices/:id/void', { preHandler: requirePerm('invoice.void') }, async (req) => {
+    const id = (req.params as any).id
+    const bid = req.user!.businessId
+
     await prisma.$transaction(async (tx) => {
-      await tx.invoice.update({ where: { id: inv.id }, data: { status: 'void' } })
-      for (const l of inv.lines) {
-        await tx.stockLedger.create({ data: { businessId: req.user!.businessId, itemId: l.itemId, deltaQty: l.qty, reason: 'return', refType: 'void', refId: inv.id, createdBy: req.user!.id } })
+      const rows = await tx.$queryRaw<Array<{ id: string; status: string }>>`
+        SELECT id, status
+        FROM "Invoice"
+        WHERE id = ${id} AND "businessId" = ${bid}
+        FOR UPDATE
+      `
+      const inv = rows[0]
+      if (!inv) throw Object.assign(new Error('not_found'), { statusCode: 404 })
+      if (inv.status === 'void') return
+
+      const sumResult = await tx.payment.aggregate({
+        where: { invoiceId: inv.id, businessId: bid },
+        _sum: { amount: true },
+      })
+      const paid = sumResult._sum.amount || 0
+      if (paid > 0) {
+        throw Object.assign(new Error('paid_invoice_cannot_void'), {
+          statusCode: 400,
+          messageText: 'Issue a credit note instead.',
+        })
       }
+
+      await tx.invoice.update({ where: { id: inv.id }, data: { status: 'void' } })
+      const lines = await tx.invoiceLine.findMany({ where: { invoiceId: inv.id } })
+      for (const l of lines) {
+        await tx.stockLedger.create({
+          data: {
+            businessId: bid,
+            itemId: l.itemId,
+            deltaQty: l.qty,
+            reason: 'return',
+            refType: 'void',
+            refId: inv.id,
+            createdBy: req.user!.id,
+          },
+        })
+      }
+      await audit(
+        {
+          businessId: bid,
+          userId: req.user!.id,
+          action: 'invoice.void',
+          entity: 'Invoice',
+          entityId: inv.id,
+          before: { status: inv.status },
+          after: { status: 'void' },
+        },
+        tx,
+      )
     })
-    await audit({ businessId: req.user!.businessId, userId: req.user!.id, action: 'invoice.void', entity: 'Invoice', entityId: inv.id, before: { status: inv.status }, after: { status: 'void' } })
     return { ok: true }
   })
 
-  // credit notes — financial recognition of returns
-  app.post('/invoices/:id/credit-notes', { preHandler: requirePerm('invoice.void') }, async (req, reply) => {
+  // credit notes — financial recognition of returns with remaining returnable quantity validation
+  app.post('/invoices/:id/credit-notes', { preHandler: requirePerm('invoice.void') }, async (req) => {
     const b = createCreditNoteSchema.parse(req.body)
-    const inv = await prisma.invoice.findFirst({ where: { id: (req.params as any).id, businessId: req.user!.businessId }, include: { lines: true } })
-    if (!inv) return reply.code(404).send({ error: 'not_found' })
-    const ids = [...new Set(b.lines.map((l) => l.itemId))]
-    const items = await prisma.item.findMany({ where: { id: { in: ids }, businessId: req.user!.businessId } })
-    const byId = new Map(items.map((i) => [i.id, i]))
-    // snapshot from original invoice line where possible (price protection)
-    const invLineByItem = new Map(inv.lines.map((l) => [l.itemId, l]))
-    const resolved = b.lines.map((l) => {
-      const orig = invLineByItem.get(l.itemId)
-      const unitPrice = orig?.unitPriceSnapshot ?? byId.get(l.itemId)?.salePrice ?? 0
-      const unitCost = orig?.unitCostSnapshot ?? byId.get(l.itemId)?.costPrice ?? 0
-      const taxBps = orig?.taxRateSnapshotBps ?? byId.get(l.itemId)?.taxRateBps ?? 0
-      const t = lineTotals(l.qty, unitPrice, taxBps)
-      return { itemId: l.itemId, qty: l.qty, unitPriceSnapshot: unitPrice, unitCostSnapshot: unitCost, taxRateSnapshotBps: taxBps, ...t }
-    })
-    const subtotal = resolved.reduce((s, r) => s + r.subtotal, 0)
-    const taxTotal = resolved.reduce((s, r) => s + r.tax, 0)
+    const id = (req.params as any).id
+    const bid = req.user!.businessId
+
     const note = await prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ id: string; status: string; grandTotal: number }>>`
+        SELECT id, status, "grandTotal"
+        FROM "Invoice"
+        WHERE id = ${id} AND "businessId" = ${bid}
+        FOR UPDATE
+      `
+      const inv = rows[0]
+      if (!inv) throw Object.assign(new Error('not_found'), { statusCode: 404 })
+      if (inv.status === 'void') throw Object.assign(new Error('invoice_void'), { statusCode: 400 })
+
+      const origLines = await tx.invoiceLine.findMany({
+        where: { invoiceId: inv.id, businessId: bid },
+        include: { item: true },
+      })
+      const origByItem = new Map(origLines.map((l) => [l.itemId, l]))
+
+      // Sum existing credit note quantities for each item on this invoice
+      const creditedSums = await tx.creditNoteLine.groupBy({
+        by: ['itemId'],
+        where: { creditNote: { invoiceId: inv.id }, businessId: bid },
+        _sum: { qty: true },
+      })
+      const alreadyCredited = new Map(creditedSums.map((c) => [c.itemId, Number(c._sum.qty || 0)]))
+
+      // Verify each requested return line does not exceed remaining returnable quantity
+      for (const l of b.lines) {
+        const orig = origByItem.get(l.itemId)
+        if (!orig) {
+          throw Object.assign(new Error('item_not_on_invoice'), {
+            statusCode: 400,
+            messageText: `Item ${l.itemId} is not present on original invoice`,
+          })
+        }
+        const origQty = Number(orig.qty)
+        const previousQty = alreadyCredited.get(l.itemId) || 0
+        const returnable = Math.max(0, origQty - previousQty)
+        if (l.qty > returnable) {
+          throw Object.assign(new Error('CREDIT_NOTE_EXCEEDS_REMAINING_QTY'), {
+            statusCode: 400,
+            messageText: `Requested return qty (${l.qty}) exceeds returnable qty (${returnable}) for item "${orig.item.name}"`,
+          })
+        }
+        alreadyCredited.set(l.itemId, previousQty + l.qty)
+      }
+
+      const ids = [...new Set(b.lines.map((l) => l.itemId))]
+      const items = await tx.item.findMany({ where: { id: { in: ids }, businessId: bid } })
+      const byId = new Map(items.map((i) => [i.id, i]))
+
+      const resolved = b.lines.map((l) => {
+        const orig = origByItem.get(l.itemId)
+        const unitPrice = orig?.unitPriceSnapshot ?? byId.get(l.itemId)?.salePrice ?? 0
+        const unitCost = orig?.unitCostSnapshot ?? byId.get(l.itemId)?.costPrice ?? 0
+        const taxBps = orig?.taxRateSnapshotBps ?? byId.get(l.itemId)?.taxRateBps ?? 0
+        const t = lineTotals(l.qty, unitPrice, taxBps)
+        return { itemId: l.itemId, qty: l.qty, unitPriceSnapshot: unitPrice, unitCostSnapshot: unitCost, taxRateSnapshotBps: taxBps, ...t }
+      })
+      const subtotal = resolved.reduce((s, r) => s + r.subtotal, 0)
+      const taxTotal = resolved.reduce((s, r) => s + r.tax, 0)
+
       const cn = await tx.creditNote.create({
         data: {
-          businessId: req.user!.businessId, invoiceId: inv.id, reason: b.reason,
-          subtotal, taxTotal, grandTotal: subtotal + taxTotal,
-          lines: { create: resolved.map((r) => ({ businessId: req.user!.businessId, itemId: r.itemId, qty: r.qty, unitPriceSnapshot: r.unitPriceSnapshot, unitCostSnapshot: r.unitCostSnapshot, taxRateSnapshotBps: r.taxRateSnapshotBps })) },
+          businessId: bid,
+          invoiceId: inv.id,
+          reason: b.reason,
+          subtotal,
+          taxTotal,
+          grandTotal: subtotal + taxTotal,
+          lines: {
+            create: resolved.map((r) => ({
+              businessId: bid,
+              itemId: r.itemId,
+              qty: r.qty,
+              unitPriceSnapshot: r.unitPriceSnapshot,
+              unitCostSnapshot: r.unitCostSnapshot,
+              taxRateSnapshotBps: r.taxRateSnapshotBps,
+            })),
+          },
         },
         include: { lines: true },
       })
+
       for (const r of resolved) {
-        await tx.stockLedger.create({ data: { businessId: req.user!.businessId, itemId: r.itemId, deltaQty: r.qty, reason: 'return', refType: 'credit_note', refId: cn.id, createdBy: req.user!.id } })
+        await tx.stockLedger.create({
+          data: {
+            businessId: bid,
+            itemId: r.itemId,
+            deltaQty: r.qty,
+            reason: 'return',
+            refType: 'credit_note',
+            refId: cn.id,
+            createdBy: req.user!.id,
+          },
+        })
       }
+
+      await audit(
+        {
+          businessId: bid,
+          userId: req.user!.id,
+          action: 'credit_note.create',
+          entity: 'Invoice',
+          entityId: inv.id,
+          after: { creditNoteId: cn.id, grandTotal: cn.grandTotal, reason: b.reason },
+        },
+        tx,
+      )
+
       return cn
     })
-    await audit({ businessId: req.user!.businessId, userId: req.user!.id, action: 'credit_note.create', entity: 'Invoice', entityId: inv.id, after: { creditNoteId: note.id, grandTotal: note.grandTotal } })
+
     return note
   })
+
 
   app.get('/invoices/:id/pdf', { preHandler: requireAuth }, async (req, reply) => {
     const inv = await prisma.invoice.findFirst({ where: { id: (req.params as any).id, businessId: req.user!.businessId }, include: { lines: { include: { item: true } }, customer: true, business: true } })

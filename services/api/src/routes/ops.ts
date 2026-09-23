@@ -3,6 +3,7 @@ import { prisma } from '../db.js'
 import { requireAuth, requirePerm } from '../auth.js'
 import { audit } from '../audit.js'
 import { expenseSchema, businessPatchSchema } from '@ecobills/types'
+import { lineTaxable, lineCost, lineTax } from '../money.js'
 
 export async function opsRoutes(app: FastifyInstance) {
   // ---- expenses ----
@@ -15,6 +16,8 @@ export async function opsRoutes(app: FastifyInstance) {
   })
 
   // ---- P&L: revenue/COGS net of credit notes, accrual by issue date ----
+  // GST collected from customers is a tax liability (Output GST), NOT business revenue.
+  // Revenue is taxable sales value net of returns.
   app.get('/reports/pnl', { preHandler: requirePerm('reports.view') }, async (req) => {
     const q = req.query as any
     const from = q?.from ? new Date(q.from) : new Date(Date.now() - 30 * 86400e3)
@@ -31,37 +34,56 @@ export async function opsRoutes(app: FastifyInstance) {
     })
     const expenses = await prisma.expense.findMany({ where: { businessId: bid, date: { gte: from, lte: to } } })
 
-    const rev = (l: any) => Number(l.qty) * l.unitPriceSnapshot * (1 + l.taxRateSnapshotBps / 10000)
-    const cost = (l: any) => Number(l.qty) * l.unitCostSnapshot
-    const grossRev = invLines.reduce((s, l) => s + rev(l), 0)
-    const cnRev = cnLines.reduce((s, l) => s + rev(l), 0)
+    const taxable = (l: any) => lineTaxable(Number(l.qty), l.unitPriceSnapshot)
+    const tax = (l: any) => lineTax(taxable(l), l.taxRateSnapshotBps)
+    const cost = (l: any) => lineCost(Number(l.qty), l.unitCostSnapshot)
+
+    const grossSalesTaxable = invLines.reduce((s, l) => s + taxable(l), 0)
+    const cnTaxable = cnLines.reduce((s, l) => s + taxable(l), 0)
     const grossCost = invLines.reduce((s, l) => s + cost(l), 0)
     const cnCost = cnLines.reduce((s, l) => s + cost(l), 0)
-    const revenue = Math.round(grossRev - cnRev)
+
+    const salesOutputGst = invLines.reduce((s, l) => s + tax(l), 0)
+    const cnOutputGst = cnLines.reduce((s, l) => s + tax(l), 0)
+    const outputGst = Math.max(0, salesOutputGst - cnOutputGst)
+
+    const revenue = Math.round(grossSalesTaxable - cnTaxable) // Net taxable sales revenue
     const cogs = Math.round(grossCost - cnCost)
     const gross = revenue - cogs
     const expTotal = expenses.reduce((s, e) => s + e.amount, 0)
     const net = gross - expTotal
+    const grossInvoiced = revenue + outputGst
 
-    // trend by day
+    // trend by day (taxable revenue net of credit notes)
     const byDay = new Map<string, number>()
     for (const l of invLines) {
       const d = l.invoice.issueDate.toISOString().slice(0, 10)
-      byDay.set(d, (byDay.get(d) || 0) + Math.round(rev(l)))
+      byDay.set(d, (byDay.get(d) || 0) + taxable(l))
     }
     for (const l of cnLines) {
       const d = l.creditNote.issueDate.toISOString().slice(0, 10)
-      byDay.set(d, (byDay.get(d) || 0) - Math.round(rev(l)))
+      byDay.set(d, (byDay.get(d) || 0) - taxable(l))
     }
     const trend = [...byDay.entries()].sort().map(([date, total]) => ({ date, total }))
 
-    // top items by revenue and margin
+    // top items by taxable revenue and margin
     const agg = new Map<string, { name: string; revenue: number; margin: number }>()
     for (const l of invLines) {
       const a = agg.get(l.itemId) || { name: l.item.name, revenue: 0, margin: 0 }
-      a.revenue += Math.round(rev(l))
-      a.margin += Math.round(rev(l)) - Math.round(cost(l))
+      const rev = taxable(l)
+      const c = cost(l)
+      a.revenue += rev
+      a.margin += rev - c
       agg.set(l.itemId, a)
+    }
+    for (const l of cnLines) {
+      const a = agg.get(l.itemId)
+      if (a) {
+        const rev = taxable(l)
+        const c = cost(l)
+        a.revenue -= rev
+        a.margin -= rev - c
+      }
     }
     const top = [...agg.values()].sort((a, b) => b.revenue - a.revenue).slice(0, 10)
 
@@ -71,8 +93,22 @@ export async function opsRoutes(app: FastifyInstance) {
     const map = new Map(sums.map((s) => [s.itemId, Number(s._sum.deltaQty || 0)]))
     const stockValue = items.reduce((s, it) => s + Math.max(0, map.get(it.id) || 0) * it.costPrice, 0)
 
-    return { from, to, revenue, cogs, grossProfit: gross, expenses: expTotal, netProfit: net, trend, topItems: top, stockValue }
+    return {
+      from,
+      to,
+      revenue,
+      cogs,
+      grossProfit: gross,
+      expenses: expTotal,
+      netProfit: net,
+      outputGst,
+      grossInvoiced,
+      trend,
+      topItems: top,
+      stockValue,
+    }
   })
+
 
   // ---- dashboard summary ----
   app.get('/dashboard/summary', { preHandler: requireAuth }, async (req) => {
