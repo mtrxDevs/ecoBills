@@ -137,6 +137,7 @@ model Session {
 enum ChallengePurpose {
   two_factor
   email_verify
+  password_reset
 }
 model TwoFactorChallenge {
   id         String    @id @default(cuid())

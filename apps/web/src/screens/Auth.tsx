@@ -73,6 +73,12 @@ export function Login() {
   const [code, setCode] = useState('')
   const [codeErr, setCodeErr] = useState('')
   const [resent, setResent] = useState(false)
+  // Forgot-password mode: email → code + new password → done.
+  const [forgot, setForgot] = useState(false)
+  const [forgotSent, setForgotSent] = useState(false)
+  const [forgotToken, setForgotToken] = useState<string | null>(null)
+  const [newPassword, setNewPassword] = useState('')
+  const [resetDone, setResetDone] = useState(false)
   const nav = useNavigate()
   const { setMe } = useMe()
 
@@ -140,6 +146,79 @@ export function Login() {
     }
   }
 
+  function backToLogin() {
+    setChallengeToken(null)
+    setForgot(false)
+    setForgotSent(false)
+    setForgotToken(null)
+    setNewPassword('')
+    setResetDone(false)
+    setCode('')
+    setCodeErr('')
+    setErr('')
+  }
+
+  async function sendResetCode(e: React.FormEvent) {
+    e.preventDefault()
+    setErr('')
+    setPending(true)
+    try {
+      const res = await api.post('/auth/forgot-password', { email })
+      // Known inboxes come back with a challenge; unknown ones get a bare ok
+      // (the server won't say which) — either way the message below is true.
+      setForgotToken(res?.challengeToken || null)
+      setForgotSent(true)
+      setCode('')
+      setCodeErr('')
+      setNewPassword('')
+      setResent(false)
+    } catch {
+      setErr('Could not send a code. Check the connection and try again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function submitNewPassword(e: React.FormEvent) {
+    e.preventDefault()
+    if (!forgotToken || code.length !== 6 || newPassword.length < 8 || pending) return
+    setCodeErr('')
+    setPending(true)
+    try {
+      await api.post('/auth/reset-password', { challengeToken: forgotToken, code, newPassword })
+      setResetDone(true)
+    } catch (err2) {
+      const c = errorCode(err2)
+      if (c === 'challenge_expired') setCodeErr('That code expired. Request a new one below.')
+      else if (c === 'challenge_locked') setCodeErr('Too many wrong tries. Request a new code to try again.')
+      else if (c === 'invalid_challenge') {
+        setForgotToken(null)
+        setForgotSent(false)
+        setErr('That attempt expired. Start again below.')
+      } else setCodeErr(err2 instanceof Error ? err2.message : 'Wrong code. Check the email and try again.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function resendReset() {
+    if (!forgotToken || pending) return
+    setPending(true)
+    try {
+      const res = await api.post('/auth/2fa/resend', { challengeToken: forgotToken })
+      setForgotToken(res.challengeToken)
+      setCode('')
+      setCodeErr('')
+      setResent(true)
+    } catch {
+      setForgotToken(null)
+      setForgotSent(false)
+      setErr('That attempt expired. Start again below.')
+    } finally {
+      setPending(false)
+    }
+  }
+
   // api.post throws the raw response body, so the server's error codes
   // ('invalid_code', 'challenge_expired', …) are matched by substring below.
   return (
@@ -194,6 +273,26 @@ export function Login() {
           </div>
           {resent ? <p className="text-sm text-[var(--color-ink-muted)]">A new code is on its way.</p> : null}
         </form>
+      ) : forgot ? (
+        <ForgotFlow
+          email={email}
+          setEmail={setEmail}
+          forgotSent={forgotSent}
+          forgotToken={forgotToken}
+          code={code}
+          setCode={setCode}
+          codeErr={codeErr}
+          newPassword={newPassword}
+          setNewPassword={setNewPassword}
+          resetDone={resetDone}
+          resent={resent}
+          pending={pending}
+          err={err}
+          onSend={sendResetCode}
+          onSubmit={submitNewPassword}
+          onResend={resendReset}
+          onBack={backToLogin}
+        />
       ) : (
         <form className="flex flex-col gap-4" noValidate onSubmit={submitPassword}>
           <TextField
@@ -214,6 +313,22 @@ export function Login() {
           <Button type="submit" loading={pending} loadingLabel="Signing in" disabled={!email || !password}>
             Log in
           </Button>
+          <p className="text-center text-sm">
+            <button
+              type="button"
+              className={`rounded-[var(--radius-sm)] font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
+              onClick={() => {
+                setForgot(true)
+                setForgotSent(false)
+                setForgotToken(null)
+                setResetDone(false)
+                setErr('')
+                setCodeErr('')
+              }}
+            >
+              Forgot password?
+            </button>
+          </p>
         </form>
       )}
       <p className="mt-4 text-sm text-[var(--color-ink-muted)]">
@@ -230,6 +345,119 @@ export function Login() {
 }
 
 const STEPS = ['Business', 'Owner', 'Items']
+
+type ForgotProps = {
+  email: string
+  setEmail: (v: string) => void
+  forgotSent: boolean
+  forgotToken: string | null
+  code: string
+  setCode: (v: string) => void
+  codeErr: string
+  newPassword: string
+  setNewPassword: (v: string) => void
+  resetDone: boolean
+  resent: boolean
+  pending: boolean
+  err: string
+  onSend: (e: React.FormEvent) => void
+  onSubmit: (e: React.FormEvent) => void
+  onResend: () => void
+  onBack: () => void
+}
+
+/** Forgot-password flow: email → code + new password → done. Never reveals
+ * whether the address has an account — the neutral message is true either way. */
+function ForgotFlow(p: ForgotProps) {
+  const backLink = (
+    <button
+      type="button"
+      className={`rounded-[var(--radius-sm)] text-sm text-[var(--color-ink-muted)] underline underline-offset-2 hover:no-underline ${focusRing}`}
+      onClick={p.onBack}
+    >
+      Back to log in
+    </button>
+  )
+
+  if (p.resetDone) {
+    return (
+      <div className="flex flex-col gap-4">
+        <p className="font-display text-lg font-semibold text-[var(--color-ink)]">Password changed</p>
+        <p className="text-sm text-[var(--color-ink-muted)]">
+          Log in with the new password. Every other session on this account was signed out.
+        </p>
+        <Button onClick={p.onBack}>Back to log in</Button>
+      </div>
+    )
+  }
+
+  if (!p.forgotSent) {
+    return (
+      <form className="flex flex-col gap-4" noValidate onSubmit={p.onSend}>
+        <p className="text-sm text-[var(--color-ink-muted)]">Enter your account email and we will send a 6-digit reset code.</p>
+        <TextField
+          label="Email"
+          inputProps={{ type: 'email', autoComplete: 'username', placeholder: 'you@shop.com' }}
+          value={p.email}
+          onValueChange={p.setEmail}
+          validate={(v) => (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ? undefined : 'Enter a valid email address.')}
+        />
+        <FormError message={p.err} />
+        <Button type="submit" loading={p.pending} loadingLabel="Sending code" disabled={!p.email}>
+          Send code
+        </Button>
+        {backLink}
+      </form>
+    )
+  }
+
+  if (!p.forgotToken) {
+    return (
+      <div className="flex flex-col gap-4">
+        <p className="text-sm text-[var(--color-ink-muted)]">If an account uses this email, a code is on its way. Check the inbox (and spam).</p>
+        {backLink}
+      </div>
+    )
+  }
+
+  return (
+    <form className="flex flex-col gap-4" noValidate onSubmit={p.onSubmit}>
+      <p className="text-sm text-[var(--color-ink-muted)]">
+        Enter the 6-digit code sent to <b>{p.email}</b>, then choose the new password.
+      </p>
+      <TextField
+        label="6-digit code"
+        inputProps={{ inputMode: 'numeric', autoComplete: 'one-time-code', maxLength: 6, autoFocus: true, placeholder: '••••••' }}
+        value={p.code}
+        onValueChange={(v) => p.setCode(v.replace(/\D/g, '').slice(0, 6))}
+        validate={(v) => (v.length === 6 ? undefined : 'Enter all 6 digits.')}
+      />
+      <TextField
+        label="New password"
+        hint="8 characters or more."
+        inputProps={{ type: 'password', autoComplete: 'new-password', placeholder: 'New password' }}
+        value={p.newPassword}
+        onValueChange={p.setNewPassword}
+        validate={(v) => (v.length >= 8 ? undefined : 'Use at least 8 characters.')}
+      />
+      <FormError message={p.codeErr} />
+      <Button type="submit" loading={p.pending} loadingLabel="Changing password" disabled={p.code.length !== 6 || p.newPassword.length < 8}>
+        Set new password
+      </Button>
+      <div className="flex items-center justify-between text-sm">
+        <button
+          type="button"
+          className={`rounded-[var(--radius-sm)] font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
+          onClick={p.onResend}
+        >
+          Send a new code
+        </button>
+        {backLink}
+      </div>
+      {p.resent ? <p className="text-sm text-[var(--color-ink-muted)]">A new code is on its way.</p> : null}
+    </form>
+  )
+}
 
 export function Start() {
   const [step, setStep] = useState(0)

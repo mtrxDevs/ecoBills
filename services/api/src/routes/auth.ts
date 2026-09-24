@@ -9,10 +9,12 @@ import { sendEmail } from '../email.js'
 import {
   generateNumericCode, hashChallengeSecret, verifyChallengeCode,
   isChallengeUsable, render2faEmail, TWO_FA_CODE_TTL_MINUTES, TWO_FA_MAX_ATTEMPTS,
+  type ChallengePurpose,
 } from '../twofactor.js'
 import {
   signupSchema, loginSchema, createUserSchema,
   verify2faSchema, resend2faSchema, enable2faSchema, disable2faSchema,
+  forgotPasswordSchema, resetPasswordSchema,
 } from '@ecobills/types'
 
 const STRICT_AUTH_LIMIT = { max: 20, timeWindow: '1 minute' } as const
@@ -89,6 +91,36 @@ export async function authRoutes(app: FastifyInstance) {
     return { user: pub({ ...user, emailVerified: true }) }
   })
 
+  // Password reset, step 1: ask for a code. Known addresses get a challenge
+  // token back; unknown ones get a bare ok. That shape difference reveals
+  // account existence — accepted deliberately, because /auth/signup already
+  // does via email_taken, and the real flow cannot continue without the token.
+  app.post('/auth/forgot-password', { config: { rateLimit: STRICT_AUTH_LIMIT } }, async (req, reply) => {
+    if (!dbReady) return reply.code(503).send({ error: 'database_unavailable' })
+    const body = forgotPasswordSchema.parse(req.body)
+    const user = await prisma.user.findUnique({ where: { email: body.email } })
+    if (!user) return { ok: true }
+    const challengeToken = await issueChallenge(user.id, user.email, 'password_reset')
+    return { ok: true, challengeToken }
+  })
+
+  // Step 2: a valid code sets the new password. Success also verifies the
+  // inbox (proving it), kills every other session (a password change means
+  // "everyone else out"), and retires all of the user's challenges.
+  app.post('/auth/reset-password', { config: { rateLimit: STRICT_AUTH_LIMIT } }, async (req, reply) => {
+    if (!dbReady) return reply.code(503).send({ error: 'database_unavailable' })
+    const body = resetPasswordSchema.parse(req.body)
+    const user = await consumeChallenge(body.challengeToken, body.code, 'password_reset', reply)
+    if (!user) return
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: user.id }, data: { passwordHash: await hashPassword(body.newPassword), emailVerified: true } }),
+      prisma.session.deleteMany({ where: { userId: user.id } }),
+      prisma.twoFactorChallenge.deleteMany({ where: { userId: user.id } }),
+    ])
+    await audit({ businessId: user.businessId, userId: user.id, action: 'password.reset', entity: 'User', entityId: user.id })
+    return { ok: true }
+  })
+
   // New code, new challenge; the old one dies with it.
   app.post('/auth/2fa/resend', { config: { rateLimit: STRICT_AUTH_LIMIT } }, async (req, reply) => {
     if (!dbReady) return reply.code(503).send({ error: 'database_unavailable' })
@@ -102,7 +134,7 @@ export async function authRoutes(app: FastifyInstance) {
       where: { userId: ch.userId, consumedAt: null },
       data: { consumedAt: new Date() },
     })
-    const challengeToken = await issueChallenge(ch.userId, ch.user.email, ch.purpose as 'two_factor' | 'email_verify')
+    const challengeToken = await issueChallenge(ch.userId, ch.user.email, ch.purpose as ChallengePurpose)
     return { challengeToken }
   })
 
@@ -183,7 +215,7 @@ export async function authRoutes(app: FastifyInstance) {
 }
 
 /** Create a challenge, email the code, return the (plaintext) challenge token. */
-async function issueChallenge(userId: string, email: string, purpose: 'two_factor' | 'email_verify') {
+async function issueChallenge(userId: string, email: string, purpose: ChallengePurpose) {
   const code = generateNumericCode()
   const challengeToken = newSessionToken()
   await prisma.twoFactorChallenge.create({
@@ -215,9 +247,9 @@ function publicLogoUrl() {
 /**
  * Validate a challenge of the expected purpose. Returns the user on success,
  * or replies with the failure and returns null. Single-use, expiry- and
- * attempt-capped. A token minted for one purpose never works for the other.
+ * attempt-capped. A token minted for one purpose never works for another.
  */
-async function consumeChallenge(challengeToken: string, code: string, purpose: 'two_factor' | 'email_verify', reply: any) {
+async function consumeChallenge(challengeToken: string, code: string, purpose: ChallengePurpose, reply: any) {
   const ch = await prisma.twoFactorChallenge.findUnique({
     where: { tokenHash: hashChallengeSecret(challengeToken) },
     include: { user: true },

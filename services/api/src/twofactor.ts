@@ -4,6 +4,9 @@ import { randomInt, timingSafeEqual, createHash } from 'node:crypto'
 export const TWO_FA_CODE_TTL_MINUTES = 10
 export const TWO_FA_MAX_ATTEMPTS = 5
 
+/** Challenge purposes never cross-use: a code minted for one flow dies in any other. */
+export type ChallengePurpose = 'two_factor' | 'email_verify' | 'password_reset'
+
 /** Cryptographically random 6-digit code, zero-padded range handled by bounds. */
 export function generateNumericCode() {
   return String(randomInt(0, 1000000)).padStart(6, '0')
@@ -34,13 +37,20 @@ export function isChallengeUsable(c: ChallengeState, now = new Date()) {
   return true
 }
 
-export function render2faEmail(code: string, appName = 'ecoBills', kind: 'signin' | 'verify' = 'signin', logoUrl?: string) {
+export function render2faEmail(code: string, appName = 'ecoBills', kind: 'signin' | 'verify' | 'reset' = 'signin', logoUrl?: string) {
   const isVerify = kind === 'verify'
-  const title = isVerify ? `Verify your ${appName} email` : `Your ${appName} sign-in code`
-  const line1 = isVerify ? `Your ${appName} verification code is:` : `Your ${appName} sign-in code is:`
+  const isReset = kind === 'reset'
+  const title = isVerify ? `Verify your ${appName} email` : isReset ? `Reset your ${appName} password` : `Your ${appName} sign-in code`
+  const line1 = isVerify
+    ? `Your ${appName} verification code is:`
+    : isReset
+      ? `Your ${appName} password-reset code is:`
+      : `Your ${appName} sign-in code is:`
   const line2 = isVerify
     ? `It expires in ${TWO_FA_CODE_TTL_MINUTES} minutes. If you didn't create this account, ignore this email.`
-    : `It expires in ${TWO_FA_CODE_TTL_MINUTES} minutes. If you didn't request this, ignore this email — your password alone cannot sign anyone in while two-step verification is on.`
+    : isReset
+      ? `It expires in ${TWO_FA_CODE_TTL_MINUTES} minutes. If you didn't ask to reset your password, ignore this email — nothing changes.`
+      : `It expires in ${TWO_FA_CODE_TTL_MINUTES} minutes. If you didn't request this, ignore this email — your password alone cannot sign anyone in while two-step verification is on.`
   const brand = logoUrl
     ? `<img src="${logoUrl}" alt="${appName}" height="28" style="display:block;height:28px;" />`
     : `<span style="color:#17A673;font-size:22px;font-weight:bold;font-family:Arial,sans-serif;">eco</span><span style="color:#FFFFFF;font-size:22px;font-weight:bold;font-family:Arial,sans-serif;">Bills</span>`

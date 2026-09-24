@@ -652,5 +652,51 @@ describe.runIf(hasDb)('api integration (live postgres)', () => {
     const snap = (ls: any[]) => ls.map((l) => ({ itemId: l.itemId, qty: String(l.qty), unitPriceSnapshot: l.unitPriceSnapshot, unitCostSnapshot: l.unitCostSnapshot, taxRateSnapshotBps: l.taxRateSnapshotBps }))
     expect(snap(reopened.json.lines)).toEqual(snap(inv.json.lines))
   })
+
+  // ---------- Password reset ----------
+
+  it('password reset: request → code → new password works, old dies, sessions die', async () => {
+    const addr = email('reset')
+    const { jar } = await signupBusiness(addr)
+    expect((await call('GET', '/api/auth/me', { jar })).status).toBe(200)
+
+    const f = await call('POST', '/api/auth/forgot-password', { body: { email: addr } })
+    expect(f.status).toBe(200)
+    expect(typeof f.json.challengeToken).toBe('string')
+    const r = await call('POST', '/api/auth/reset-password', {
+      body: { challengeToken: f.json.challengeToken, code: lastCodeFor(addr), newPassword: 'brandnew99' },
+    })
+    expect(r.status).toBe(200)
+
+    // old password dead, new password opens a session directly (no 2FA on)
+    expect((await call('POST', '/api/auth/login', { body: { email: addr, password: 'password123' } })).status).toBe(401)
+    const login = await call('POST', '/api/auth/login', { body: { email: addr, password: 'brandnew99' } })
+    expect(login.status).toBe(200)
+    expect(login.json.user.emailVerified).toBe(true)
+
+    // pre-reset session was killed by the password change
+    expect((await call('GET', '/api/auth/me', { jar })).status).toBe(401)
+  })
+
+  it('password reset: unknown email answers ok with no challenge', async () => {
+    const r = await call('POST', '/api/auth/forgot-password', { body: { email: `nobody-${Date.now()}@example.com` } })
+    expect(r.status).toBe(200)
+    expect(r.json).toEqual({ ok: true })
+  })
+
+  it('password reset: token is purpose-bound (cannot verify email or log in with it)', async () => {
+    const addr = email('resetbind')
+    await signupBusiness(addr)
+    const f = await call('POST', '/api/auth/forgot-password', { body: { email: addr } })
+    const code = lastCodeFor(addr)
+    // right code, wrong purpose → rejected, nothing consumed visibly
+    const v = await call('POST', '/api/auth/verify-email', { body: { challengeToken: f.json.challengeToken, code } })
+    expect(v.status).toBe(401)
+    // and the reset token still works for its own purpose afterwards
+    const r = await call('POST', '/api/auth/reset-password', {
+      body: { challengeToken: f.json.challengeToken, code, newPassword: 'another99' },
+    })
+    expect(r.status).toBe(200)
+  })
 })
 
