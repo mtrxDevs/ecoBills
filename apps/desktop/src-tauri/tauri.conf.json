@@ -4,7 +4,7 @@
   "version": "0.1.1",
   "identifier": "works.mtrx.ecobills",
   "build": {
-    "frontendDist": "../web/dist",
+    "frontendDist": "../../web/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "pnpm --filter @ecobills/web dev",
     "beforeBuildCommand": "pnpm --filter @ecobills/web build"
