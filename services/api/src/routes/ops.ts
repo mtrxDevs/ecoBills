@@ -6,6 +6,51 @@ import { expenseSchema, businessPatchSchema } from '@ecobills/types'
 import { lineTaxable, lineCost, lineTax } from '../money.js'
 
 export async function opsRoutes(app: FastifyInstance) {
+  // ---- offline snapshot: everything the desktop/mobile cache needs ----
+  // Bounded by design (caps below); the client stores it in IndexedDB and
+  // serves reads from it while offline. Stock figures are all-time ledger
+  // sums as of sync time — never a live promise, always labeled with age.
+  app.get('/sync/snapshot', { preHandler: requireAuth }, async (req) => {
+    const bid = req.user!.businessId
+    const since = new Date(Date.now() - 30 * 86400e3)
+    const [items, stockSums, customers, suppliers, invoices, expenses, orders, business] = await Promise.all([
+      prisma.item.findMany({ where: { businessId: bid }, orderBy: { name: 'asc' }, take: 1000 }),
+      prisma.stockLedger.groupBy({ by: ['itemId'], where: { businessId: bid }, _sum: { deltaQty: true } }),
+      prisma.customer.findMany({ where: { businessId: bid }, orderBy: { name: 'asc' }, take: 500 }),
+      prisma.supplier.findMany({ where: { businessId: bid }, orderBy: { name: 'asc' }, take: 200 }),
+      prisma.invoice.findMany({
+        where: { businessId: bid, issueDate: { gte: since } },
+        include: {
+          lines: true,
+          payments: true,
+          customer: { select: { id: true, name: true } },
+          creditNotes: { select: { id: true, issueDate: true, grandTotal: true } },
+        },
+        orderBy: { issueDate: 'desc' },
+        take: 500,
+      }),
+      prisma.expense.findMany({ where: { businessId: bid, date: { gte: since } }, orderBy: { date: 'desc' }, take: 300 }),
+      prisma.purchaseOrder.findMany({
+        where: { businessId: bid, createdAt: { gte: since } },
+        include: { lines: { include: { item: { select: { id: true, name: true, unit: true } } } }, supplier: true },
+        orderBy: { createdAt: 'desc' },
+        take: 200,
+      }),
+      prisma.business.findUniqueOrThrow({ where: { id: bid } }),
+    ])
+    const stock = new Map(stockSums.map((s) => [s.itemId, Number(s._sum.deltaQty || 0)]))
+    return {
+      meta: { syncedAt: new Date().toISOString(), windowDays: 30 },
+      business: { id: business.id, name: business.name, state: business.state, gstin: business.gstin, currency: business.currency },
+      items: items.map((it) => ({ ...it, currentStock: stock.get(it.id) || 0 })),
+      customers,
+      suppliers,
+      invoices: invoices.map((inv: any) => ({ ...inv, amountPaid: (inv.payments || []).reduce((s: number, p: any) => s + p.amount, 0) })),
+      expenses,
+      purchaseOrders: orders,
+    }
+  })
+
   // ---- expenses ----
   app.get('/expenses', { preHandler: requirePerm('reports.view') }, async (req) => {
     return prisma.expense.findMany({ where: { businessId: req.user!.businessId }, orderBy: { date: 'desc' }, take: 300 })

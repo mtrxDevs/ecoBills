@@ -21,6 +21,9 @@ import {
   useToast,
 } from '@ecobills/ui'
 import { api, money } from '../lib/api'
+import { useNet } from '../lib/offline/net'
+import { readAll } from '../lib/offline/db'
+import { outstandingByCustomer } from '../lib/offline/sync'
 
 const PAGE_SIZE = 20
 
@@ -37,6 +40,7 @@ export function Customers() {
   const [page, setPage] = useState(1)
   const [active, setActive] = useState('all')
   const [dialog, setDialog] = useState<null | { customer?: any }>(null)
+  const online = useNet((s) => s.online)
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -50,19 +54,50 @@ export function Customers() {
     queryKey: ['customers', debouncedQ, page, active],
     queryFn: () =>
       api.get(`/customers?q=${encodeURIComponent(debouncedQ)}&page=${page}&pageSize=${PAGE_SIZE}&active=${active}`),
+    retry: online ? 3 : false,
   })
-
-  const rows: any[] = data?.data || []
-  const totalPages: number = data?.totalPages || 1
+  // Offline: cached customers with locally derived dues (no lifetime/last-txn
+  // without the server aggregates — those columns show cached dues only).
+  // Served through a query like everything else — no parallel state.
+  const offlineQ = useQuery({
+    queryKey: ['customers-offline'],
+    queryFn: async () => {
+      const [cs, dues] = await Promise.all([readAll('customers'), outstandingByCustomer()])
+      return cs.map((c: any) => ({ ...c, stats: { totalSales: 0, outstanding: dues.get(c.id)?.due || 0 } }))
+    },
+    enabled: !online && (isError || !data),
+    retry: false,
+    staleTime: 30000,
+  })
+  const offlineView = !online && (isError || !data)
+  const allRows: any[] = offlineView ? offlineQ.data ?? [] : data?.data || []
+  // Client-side search/filter/page over the snapshot (server does it online).
+  const qLower = debouncedQ.trim().toLowerCase()
+  const filtered = offlineView
+    ? allRows.filter(
+        (c: any) =>
+          (!qLower ||
+            (c.name || '').toLowerCase().includes(qLower) ||
+            (c.phone || '').includes(qLower) ||
+            (c.email || '').toLowerCase().includes(qLower) ||
+            (c.gstin || '').toLowerCase().includes(qLower)) &&
+          (active === 'all' || (active === 'active') === !!c.isActive),
+      )
+    : allRows
+  const rows = offlineView ? filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE) : filtered
+  const totalPages: number = offlineView ? Math.max(1, Math.ceil(filtered.length / PAGE_SIZE)) : data?.totalPages || 1
 
   return (
     <div>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <PageTitle>Customers</PageTitle>
-          <PageHint>Who buys from you, what they owe, and every bill behind it.</PageHint>
+          <PageHint>
+            Who buys from you, what they owe, and every bill behind it.
+            {offlineView ? ' Offline view — dues from the last sync; editing needs a connection.' : null}
+          </PageHint>
         </div>
-        <Button onClick={() => setDialog({})}>+ New customer</Button>
+        {online ? <Button onClick={() => setDialog({})}>+ New customer</Button> : null}
       </div>
 
       <div className="mb-3 flex flex-wrap gap-2">
@@ -88,9 +123,11 @@ export function Customers() {
         </Select>
       </div>
 
-      {isLoading ? (
+      {isLoading && online ? (
         <SkeletonList rows={6} />
-      ) : isError ? (
+      ) : offlineView && offlineQ.isLoading ? (
+        <SkeletonList rows={6} />
+      ) : isError && !offlineView ? (
         <ErrorState
           title="Could not load customers"
           description="Check the connection and try again."
@@ -106,7 +143,7 @@ export function Customers() {
               ? `Nothing matches “${debouncedQ}”. Try a different search.`
               : 'Add your first customer and every bill, payment and return will attach to them.'
           }
-          action={!debouncedQ ? <Button onClick={() => setDialog({})}>Add a customer</Button> : undefined}
+          action={!debouncedQ && online ? <Button onClick={() => setDialog({})}>Add a customer</Button> : undefined}
         />
       ) : (
         <>
@@ -136,12 +173,16 @@ export function Customers() {
                   </span>
                   {!c.isActive ? <Badge tone="muted">Inactive</Badge> : null}
                   <span className="flex gap-2">
-                    <Button variant="ghost" size="sm" onClick={() => setDialog({ customer: c })}>
-                      Edit
-                    </Button>
-                    <Button variant="secondary" size="sm" onClick={() => navigate(`/billing?customer=${c.id}`)}>
-                      New bill
-                    </Button>
+                    {online ? (
+                      <>
+                        <Button variant="ghost" size="sm" onClick={() => setDialog({ customer: c })}>
+                          Edit
+                        </Button>
+                        <Button variant="secondary" size="sm" onClick={() => navigate(`/billing?customer=${c.id}`)}>
+                          New bill
+                        </Button>
+                      </>
+                    ) : null}
                   </span>
                 </StaggerItem>
               ))}
@@ -149,7 +190,8 @@ export function Customers() {
           </Card>
           <div className="mt-3 flex items-center justify-between text-sm text-[var(--color-ink-muted)]">
             <span className="tnum">
-              Page {data.page} of {totalPages} · {data.total} customers
+              Page {offlineView ? page : data.page} of {totalPages} · {offlineView ? filtered.length : data.total} customers
+              {offlineView ? ' · offline' : ''}
             </span>
             <span className="flex gap-2">
               <Button variant="ghost" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>

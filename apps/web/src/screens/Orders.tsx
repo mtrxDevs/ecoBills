@@ -24,6 +24,8 @@ import {
 } from '@ecobills/ui'
 import { api, money } from '../lib/api'
 import { useMe } from '../lib/store'
+import { useNet } from '../lib/offline/net'
+import { readAll } from '../lib/offline/db'
 
 /**
  * Orders. Endpoints, payloads and the human-in-the-loop invariant are
@@ -49,11 +51,23 @@ export function Orders() {
   const [preview, setPreview] = useState<any>(null)
   const [celebrate, setCelebrate] = useState(false)
   const [drafting, setDrafting] = useState(false)
+  const online = useNet((s) => s.online)
 
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['pos'],
     queryFn: () => api.get('/purchase-orders'),
+    retry: online ? 3 : false,
   })
+  // Offline: cached orders, read-only. Sending needs the mail provider and
+  // receiving needs live ledgers, so both stay online-only actions.
+  const offlineQ = useQuery({
+    queryKey: ['pos-offline'],
+    queryFn: () => readAll('orders'),
+    enabled: !online && (isError || !data),
+    retry: false,
+    staleTime: 30000,
+  })
+  const offlineView = !online && (isError || !data)
 
   const fromLow = useMutation({
     mutationFn: () => api.post('/purchase-orders/from-low-stock'),
@@ -98,28 +112,35 @@ export function Orders() {
     if (po) setPreview(po)
   }
 
-  const orders: any[] = data || []
+  const orders: any[] = offlineView ? offlineQ.data ?? [] : data || []
 
   return (
     <div>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <PageTitle>Orders</PageTitle>
-          <PageHint>Draft, preview, send. Nothing leaves your shop until you click Send.</PageHint>
+          <PageHint>
+            Draft, preview, send. Nothing leaves your shop until you click Send.
+            {offlineView ? ' Offline view — sending and receiving need a connection.' : null}
+          </PageHint>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" onClick={() => setDrafting(true)}>
-            New order
-          </Button>
-          <Button onClick={() => fromLow.mutate()} loading={fromLow.isPending} loadingLabel="Drafting order">
-            Review low-stock order
-          </Button>
-        </div>
+        {online ? (
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={() => setDrafting(true)}>
+              New order
+            </Button>
+            <Button onClick={() => fromLow.mutate()} loading={fromLow.isPending} loadingLabel="Drafting order">
+              Review low-stock order
+            </Button>
+          </div>
+        ) : null}
       </div>
 
-      {isLoading ? (
+      {isLoading && online ? (
         <SkeletonList rows={3} />
-      ) : isError ? (
+      ) : offlineView && offlineQ.isLoading ? (
+        <SkeletonList rows={3} />
+      ) : isError && !offlineView ? (
         <ErrorState
           title="Could not load your purchase orders"
           description="No order has been changed or sent. Check the connection and try again."
@@ -153,12 +174,12 @@ export function Orders() {
                     <Button variant="secondary" size="sm" onClick={() => setPreview(po)}>
                       Preview
                     </Button>
-                    {po.status === 'draft' && isOwner ? (
+                    {online && po.status === 'draft' && isOwner ? (
                       <Button size="sm" onClick={() => setPreview(po)}>
                         Review &amp; send
                       </Button>
                     ) : null}
-                    {po.status === 'sent' || po.status === 'partial' ? (
+                    {online && (po.status === 'sent' || po.status === 'partial') ? (
                       <Button
                         variant="secondary"
                         size="sm"
@@ -213,7 +234,7 @@ export function Orders() {
             </Button>
           ) : (
             <div className="flex flex-wrap gap-2">
-              {isOwner ? (
+              {isOwner && online ? (
                 <Button
                   className="flex-1"
                   loading={send.isPending}
@@ -226,7 +247,9 @@ export function Orders() {
                 </Button>
               ) : (
                 <p className="flex-1 text-sm text-[var(--color-ink-muted)]">
-                  Only the owner can send orders. Your preview is ready for review.
+                  {!online
+                    ? 'Sending needs a connection — review now, send when back online.'
+                    : 'Only the owner can send orders. Your preview is ready for review.'}
                 </p>
               )}
               <Button variant="secondary" onClick={() => setPreview(null)} disabled={send.isPending}>

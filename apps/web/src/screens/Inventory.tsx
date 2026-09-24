@@ -19,6 +19,8 @@ import {
 } from '@ecobills/ui'
 import { api, money } from '../lib/api'
 import { useMe } from '../lib/store'
+import { useNet } from '../lib/offline/net'
+import { readAll } from '../lib/offline/db'
 
 /**
  * Inventory. Data flow, RBAC and payload shapes are unchanged from v0.1.1:
@@ -41,11 +43,23 @@ export function Inventory() {
   const { me } = useMe()
   const isOwner = me?.user?.role === 'owner'
 
+  const online = useNet((s) => s.online)
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['items', q],
     queryFn: () => api.get(`/items${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+    retry: online ? 3 : false,
   })
   const { data: suppliers } = useQuery({ queryKey: ['suppliers'], queryFn: () => api.get('/suppliers') })
+  // Offline reads come through a query like everything else.
+  const offlineQ = useQuery({
+    queryKey: ['items-offline'],
+    queryFn: () => readAll('items'),
+    enabled: !online && (isError || !data),
+    retry: false,
+    staleTime: 30000,
+  })
+  const offlineView = !online && (isError || !data)
+  const cachedItems = offlineView ? offlineQ.data ?? null : null
 
   const create = useMutation({
     mutationFn: (b: any) => api.post('/items', b),
@@ -66,7 +80,8 @@ export function Inventory() {
     onError: (e: any) => toast.error('Could not adjust stock', e instanceof Error ? e.message : undefined),
   })
 
-  const items: any[] = data || []
+  const serverItems: any[] = data || []
+  const items = cachedItems !== null ? filterCached(cachedItems, q) : serverItems
   const hasQuery = q.trim().length > 0
 
   return (
@@ -74,12 +89,17 @@ export function Inventory() {
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <PageTitle>Inventory</PageTitle>
-          <PageHint>Stock levels are derived from the ledger; nothing is edited directly.</PageHint>
+          <PageHint>
+            Stock levels are derived from the ledger; nothing is edited directly.
+            {offlineView ? ' Offline view — adding items and adjustments need a connection.' : null}
+          </PageHint>
         </div>
-        <Button onClick={() => setShow(true)}>
-          <IconPlus className="text-base" />
-          Add item
-        </Button>
+        {online ? (
+          <Button onClick={() => setShow(true)}>
+            <IconPlus className="text-base" />
+            Add item
+          </Button>
+        ) : null}
       </div>
 
       {/* HID barcode scanners type fast + Enter — this ordinary focused field
@@ -102,9 +122,11 @@ export function Inventory() {
         {isLoading ? 'Loading items' : `${items.length} item${items.length === 1 ? '' : 's'} shown`}
       </p>
 
-      {isLoading ? (
+      {isLoading && online ? (
         <SkeletonTable rows={5} columns={isOwner ? 5 : 4} />
-      ) : isError ? (
+      ) : offlineView && offlineQ.isLoading ? (
+        <SkeletonTable rows={5} columns={isOwner ? 5 : 4} />
+      ) : isError && !offlineView ? (
         <ErrorState
           title="Could not load your inventory"
           description="The item list could not be fetched. Nothing has been changed. Try again."
@@ -147,7 +169,7 @@ export function Inventory() {
                   <th scope="col" className="px-4 py-2.5 font-medium">Price</th>
                   <th scope="col" className="px-4 py-2.5 font-medium">Stock</th>
                   <th scope="col" className="px-4 py-2.5 font-medium">Status</th>
-                  {isOwner && <th scope="col" className="px-4 py-2.5 font-medium">Adjust</th>}
+                    {isOwner && online && <th scope="col" className="px-4 py-2.5 font-medium">Adjust</th>}
                 </tr>
               </thead>
               <tbody>
@@ -167,9 +189,13 @@ export function Inventory() {
                       {it.currentStock} {it.unit}
                     </td>
                     <td className="px-4 py-2.5">
-                      {it.lowStock ? <Badge tone="warn">Low</Badge> : <Badge tone="ok">OK</Badge>}
+                      {(it.lowStock ?? Number(it.currentStock || 0) <= Number(it.reorderThreshold || 0)) ? (
+                        <Badge tone="warn">Low</Badge>
+                      ) : (
+                        <Badge tone="ok">OK</Badge>
+                      )}
                     </td>
-                    {isOwner && (
+                    {isOwner && online && (
                       <td className="px-4 py-2.5">
                         <button
                           type="button"
@@ -374,4 +400,11 @@ function AdjustStockPanel({
       />
     </Panel>
   )
+}
+
+/** Local search over the offline snapshot (same matching as the server). */
+function filterCached(rows: any[], q: string) {
+  const needle = q.trim().toLowerCase()
+  if (!needle) return rows
+  return rows.filter((i: any) => (i.name || '').toLowerCase().includes(needle) || (i.sku || '').toLowerCase().includes(needle))
 }

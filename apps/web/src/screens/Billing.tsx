@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -24,6 +24,9 @@ import {
 import { api, apiUrl, money } from '../lib/api'
 import { useMe } from '../lib/store'
 import { RecordPaymentDialog, ageLabel } from '../components/RecordPayment'
+import { useNet } from '../lib/offline/net'
+import { readAll } from '../lib/offline/db'
+import { enqueueDraft, listDrafts, pushAndRefresh, type DraftOp } from '../lib/offline/sync'
 
 /**
  * Billing. Every endpoint, payload and permission rule is unchanged:
@@ -46,6 +49,7 @@ export function Billing() {
   const toast = useToast()
   const { me } = useMe()
   const isOwner = me?.user?.role === 'owner'
+  const online = useNet((s) => s.online)
   const [params] = useSearchParams()
   const [customerId, setCustomerId] = useState(() => params.get('customer') || '')
   const [search, setSearch] = useState('')
@@ -54,15 +58,47 @@ export function Billing() {
   // Drives the Button's success/checkmark-morph state, then releases it.
   const [celebrate, setCelebrate] = useState(false)
 
-  const { data: items } = useQuery({ queryKey: ['items-all'], queryFn: () => api.get('/items') })
-  const { data: customers } = useQuery({ queryKey: ['customers', 'dropdown'], queryFn: () => api.get('/customers?pageSize=100') })
+  const { data: items } = useQuery({ queryKey: ['items-all'], queryFn: () => api.get('/items'), retry: online ? 3 : false })
+  const { data: customers } = useQuery({ queryKey: ['customers', 'dropdown'], queryFn: () => api.get('/customers?pageSize=100'), retry: online ? 3 : false })
   const {
     data: invoices,
     isLoading: invoicesLoading,
     isError: invoicesError,
     error: invoicesErrorObj,
     refetch: refetchInvoices,
-  } = useQuery({ queryKey: ['invoices'], queryFn: () => api.get('/invoices') })
+  } = useQuery({ queryKey: ['invoices'], queryFn: () => api.get('/invoices'), retry: online ? 3 : false })
+  // Offline reads come through queries like everything else.
+  const offlineBillsQ = useQuery({
+    queryKey: ['invoices-offline'],
+    queryFn: () => readAll('invoices'),
+    enabled: !online && (invoicesError || !invoices),
+    retry: false,
+    staleTime: 30000,
+  })
+  const offlineBills = !online && (invoicesError || !invoices)
+  const offlineItemsQ = useQuery({
+    queryKey: ['billing-items-offline'],
+    queryFn: () => readAll('items'),
+    enabled: !online,
+    retry: false,
+    staleTime: 30000,
+  })
+  const offlineCustomersQ = useQuery({
+    queryKey: ['billing-customers-offline'],
+    queryFn: () => readAll('customers'),
+    enabled: !online,
+    retry: false,
+    staleTime: 30000,
+  })
+  const draftsQ = useQuery({ queryKey: ['outbox'], queryFn: listDrafts })
+  useEffect(() => {
+    const onOutbox = () => {
+      qc.invalidateQueries({ queryKey: ['outbox'] })
+    }
+    window.addEventListener('ecobills-outbox', onOutbox)
+    return () => window.removeEventListener('ecobills-outbox', onOutbox)
+  }, [qc])
+  const drafts: DraftOp[] = draftsQ.data || []
 
   const create = useMutation({
     mutationFn: (b: any) => api.post('/invoices', b),
@@ -77,16 +113,22 @@ export function Billing() {
     onError: (e: any) => toast.error('Could not create the bill', e instanceof Error ? e.message : undefined),
   })
 
-  const found = (items || [])
+  // Offline: search and pick from the 30-day snapshot. Prices shown are the
+  // last-synced sale prices; the server reprices nothing — snapshots are
+  // taken again at sync time, so the books always reflect live item data.
+  const offlineView = !online
+  const itemPool: any[] = offlineView ? offlineItemsQ.data ?? [] : items || []
+  const customerPool: any[] = offlineView ? offlineCustomersQ.data ?? [] : (customers as any)?.data || []
+  const found = itemPool
     .filter(
       (i: any) =>
         !search ||
-        i.name.toLowerCase().includes(search.toLowerCase()) ||
-        i.sku.toLowerCase().includes(search.toLowerCase()),
+        (i.name || '').toLowerCase().includes(search.toLowerCase()) ||
+        (i.sku || '').toLowerCase().includes(search.toLowerCase()),
     )
     .slice(0, 6)
   const total = lines.reduce((s, l) => s + l.qty * l.unitPrice, 0)
-  const billList: any[] = invoices || []
+  const billList: any[] = offlineBills ? offlineBillsQ.data ?? [] : invoices || []
   const [paying, setPaying] = useState<any>(null)
 
   // Money still owed: unpaid + partial invoices, oldest pressure first.
@@ -97,6 +139,53 @@ export function Billing() {
       (a: any, b: any) => new Date(a.issueDate).getTime() - new Date(b.issueDate).getTime(),
     )
   const outstandingTotal = outstanding.reduce((s: number, inv: any) => s + inv.balance, 0)
+
+  // Coming back online pushes queued drafts in creation order, then refreshes
+  // every list from what actually landed (numbers assigned server-side).
+  const syncingRef = useRef(false)
+  useEffect(() => {
+    if (!online) return
+    if (syncingRef.current) return
+    void listDrafts().then((ops) => {
+      if (!ops.length) return
+      syncingRef.current = true
+      pushAndRefresh()
+        .then((r) => {
+          if (r.failed.length) {
+            toast.error(
+              `${r.sent} sent, ${r.failed.length} need attention`,
+              'Some drafts were rejected (e.g. stock sold meanwhile). Review them below.',
+            )
+          } else if (r.sent > 0) {
+            toast.success(r.sent === 1 ? 'Offline bill sent' : `${r.sent} offline bills sent`)
+          }
+          qc.invalidateQueries({ queryKey: ['invoices'] })
+          qc.invalidateQueries({ queryKey: ['items'] })
+          qc.invalidateQueries({ queryKey: ['outbox'] })
+        })
+        .catch(() => {})
+        .finally(() => {
+          syncingRef.current = false
+        })
+    })
+  }, [online, qc, toast])
+
+  async function saveDraft() {
+    if (!lines.length || create.isPending) return
+    try {
+      const customer = customerPool.find((c: any) => c.id === customerId)
+      await enqueueDraft({
+        customerId: customerId || null,
+        customerName: customer?.name || 'Walk-in',
+        lines: lines.map((l) => ({ itemId: l.itemId, name: l.name, qty: l.qty, unitPrice: l.unitPrice })),
+      })
+      setLines([])
+      setSearch('')
+      toast.success('Bill saved offline', 'It will send itself with the next connection.')
+    } catch {
+      toast.error('Could not save the draft', 'This device refused the write — try again.')
+    }
+  }
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -109,7 +198,7 @@ export function Billing() {
         </label>
         <Select id="bill-customer" value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
           <option value="">Walk-in (no customer)</option>
-          {((customers as any)?.data || []).map((c: any) => (
+          {customerPool.map((c: any) => (
             <option key={c.id} value={c.id}>
               {c.name}
             </option>
@@ -204,19 +293,35 @@ export function Billing() {
           <span className="font-display text-xl font-bold text-[var(--color-ink)]">
             Total <CountUp value={Math.round(total)} format={(n) => money(n)} />
           </span>
-          <Button
-            disabled={!lines.length}
-            loading={create.isPending}
-            success={celebrate}
-            loadingLabel="Creating bill"
-            successLabel="Bill created"
-            onClick={() =>
-              create.mutate({ customerId: customerId || null, lines: lines.map((l) => ({ itemId: l.itemId, qty: l.qty })) })
-            }
-          >
-            Create bill
-          </Button>
+          {online ? (
+            <Button
+              disabled={!lines.length}
+              loading={create.isPending}
+              success={celebrate}
+              loadingLabel="Creating bill"
+              successLabel="Bill created"
+              onClick={() =>
+                create.mutate({ customerId: customerId || null, lines: lines.map((l) => ({ itemId: l.itemId, qty: l.qty })) })
+              }
+            >
+              Create bill
+            </Button>
+          ) : (
+            <Button
+              disabled={!lines.length || create.isPending}
+              loading={create.isPending}
+              loadingLabel="Saving draft"
+              onClick={saveDraft}
+            >
+              Save bill offline
+            </Button>
+          )}
         </div>
+        {offlineView ? (
+          <p className="mt-2 text-xs text-[var(--color-ink-muted)]">
+            Offline — this bill is stored on this device without a number and sends itself when you reconnect. Stock and prices revalidate then.
+          </p>
+        ) : null}
 
         {done ? (
           <Card className="mt-3 border-[var(--color-accent)]/40 bg-[var(--color-accent-tint)]">
@@ -252,6 +357,31 @@ export function Billing() {
             </div>
           </Card>
         ) : null}
+
+        {drafts.length ? (
+          <Card className="mt-3 border-[var(--color-warn)]/40 bg-[var(--color-warn-tint)]">
+            <p className="mb-2 text-sm font-medium text-[var(--color-warn-text)]">
+              {drafts.length} unsynced {drafts.length === 1 ? 'bill' : 'bills'} — no numbers yet, nothing left the device
+            </p>
+            <ul className="flex flex-col gap-2">
+              {drafts.map((d) => (
+                <li key={d.opId} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                  <span className="min-w-0 flex-1 text-[var(--color-ink)]">
+                    {d.customerName} · {d.lines.map((l) => `${l.name} × ${l.qty}`).join(', ')}
+                  </span>
+                  <span className="tnum text-[var(--color-ink-muted)]">
+                    ≈ {money(d.lines.reduce((s, l) => s + l.qty * l.unitPrice, 0))}
+                  </span>
+                  {d.error ? (
+                    <span className="text-xs text-[var(--color-danger-text)]">{d.error}</span>
+                  ) : (
+                    <Badge tone="warn">Unsynced</Badge>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </Card>
+        ) : null}
       </div>
 
       <div>
@@ -268,9 +398,9 @@ export function Billing() {
           </Card>
         ) : null}
 
-        {invoicesLoading ? (
+        {invoicesLoading && online ? (
           <SkeletonList rows={4} />
-        ) : invoicesError ? (
+        ) : invoicesError && !offlineBills ? (
           <ErrorState
             title="Could not load recent bills"
             description="The bill list could not be fetched. Your saved bills are unaffected. Try again."
@@ -300,7 +430,7 @@ export function Billing() {
                       {money(inv.grandTotal - (inv.amountPaid || 0))} due · {ageLabel(inv.issueDate)}
                     </span>
                   ) : null}
-                  {inv.status === 'unpaid' || inv.status === 'partial' ? (
+                  {online && (inv.status === 'unpaid' || inv.status === 'partial') ? (
                     <button
                       type="button"
                       className={`rounded-[var(--radius-sm)] text-xs font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
@@ -309,7 +439,7 @@ export function Billing() {
                       Record payment
                     </button>
                   ) : null}
-                  {isOwner && inv.status !== 'void' && !(inv.amountPaid > 0) ? (
+                  {online && isOwner && inv.status !== 'void' && !(inv.amountPaid > 0) ? (
                     <button
                       type="button"
                       className={`rounded-[var(--radius-sm)] text-xs font-medium text-[var(--color-danger-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}

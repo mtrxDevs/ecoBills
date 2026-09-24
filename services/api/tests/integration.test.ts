@@ -698,5 +698,55 @@ describe.runIf(hasDb)('api integration (live postgres)', () => {
     })
     expect(r.status).toBe(200)
   })
+
+  // ---------- Offline drafts: idempotent creation ----------
+
+  async function mkStockedItem(jar: Jar, qty = 50) {
+    const r = await call('POST', '/api/items', {
+      body: { name: 'M1 Item', sku: `OFFLINE-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, salePrice: 10000, costPrice: 6000, taxRateBps: 1800 },
+      jar,
+    })
+    expect(r.status).toBe(200)
+    const a = await call('POST', '/api/stock/adjust', { body: { itemId: r.json.id, deltaQty: qty, note: 'opening' }, jar })
+    expect(a.status).toBe(200)
+    return r.json
+  }
+
+  it('offline retry: same clientKey returns the original invoice, never a twin', async () => {
+    const { jar } = await signupBusiness(email('offlinekey'))
+    const item = await mkStockedItem(jar)
+    const key = `ck-test-${Date.now()}`
+    const first = await call('POST', '/api/invoices', {
+      body: { customerId: null, lines: [{ itemId: item.id, qty: 1 }], clientKey: key },
+      jar,
+    })
+    expect(first.status).toBe(200)
+    expect(first.json.clientKey).toBe(key)
+    // ambiguous failure retried: identical replay
+    const replay = await call('POST', '/api/invoices', {
+      body: { customerId: null, lines: [{ itemId: item.id, qty: 1 }], clientKey: key },
+      jar,
+    })
+    expect(replay.status).toBe(200)
+    expect(replay.json.id).toBe(first.json.id)
+    expect(replay.json.invoiceNumber).toBe(first.json.invoiceNumber)
+    expect(replay.json.replayed).toBe(true)
+    // exactly one invoice exists for that key
+    const list = await call('GET', '/api/invoices', { jar })
+    expect(list.json.filter((i: any) => i.clientKey === key).length).toBe(1)
+  })
+
+  it('sync snapshot: bounded 30-day bundle with derived stock', async () => {
+    const { jar } = await signupBusiness(email('snap'))
+    await mkStockedItem(jar)
+    const s = await call('GET', '/api/sync/snapshot', { jar })
+    expect(s.status).toBe(200)
+    expect(s.json.meta.windowDays).toBe(30)
+    expect(typeof s.json.meta.syncedAt).toBe('string')
+    expect(s.json.items.length).toBeGreaterThan(0)
+    expect(typeof s.json.items[0].currentStock).toBe('number')
+    expect(Array.isArray(s.json.customers)).toBe(true)
+    expect(Array.isArray(s.json.invoices)).toBe(true)
+  })
 })
 

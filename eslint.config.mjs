@@ -28,6 +28,9 @@ export default tseslint.config(
       'apps/desktop/src-tauri/**',
       'apps/mobile/android/**',
       'apps/mobile/ios/**',
+      // Saved third-party reference dump, not our code. The Framer component
+      // beside it (apps/page_content/*.tsx) IS still linted.
+      'apps/page_content/**/*.js',
     ],
   },
   js.configs.recommended,

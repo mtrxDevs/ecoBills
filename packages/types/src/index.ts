@@ -119,6 +119,9 @@ export const createInvoiceSchema = z.object({
   placeOfSupplyState: z.string().max(80).optional(),
   issueDate: z.string().optional(), // ISO date
   lines: z.array(invoiceLineInput).min(1).max(200),
+  // Client-generated idempotency key for offline drafts retried after
+  // ambiguous failures. Replays return the original invoice.
+  clientKey: z.string().min(8).max(64).optional(),
 })
 
 export const recordPaymentSchema = z.object({

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -15,6 +15,8 @@ import {
   useToast,
 } from '@ecobills/ui'
 import { api, money } from '../lib/api'
+import { useNet } from '../lib/offline/net'
+import { customerDetailFromCache, type CachedCustomerView } from '../lib/offline/sync'
 import { RecordPaymentDialog, ageLabel } from '../components/RecordPayment'
 import { CustomerDialog } from './Customers'
 
@@ -25,6 +27,12 @@ import { CustomerDialog } from './Customers'
  */
 export function CustomerDetail() {
   const { id } = useParams()
+  const online = useNet((s) => s.online)
+  if (!online) return <OfflineCustomerDetail id={id || ''} />
+  return <OnlineCustomerDetail id={id || ''} />
+}
+
+function OnlineCustomerDetail({ id }: { id: string }) {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const toast = useToast()
@@ -275,8 +283,7 @@ export function CustomerDetail() {
   )
 }
 
-function Pager({ page, totalPages, total, unit, onPage }: { page: number; totalPages: number; total: number; unit: string; onPage: (p: number) => void }) {
-  return (
+function Pager({ page, totalPages, total, unit, onPage }: { page: number; totalPages: number; total: number; unit: string; onPage: (p: number) => void }) {  return (
     <div className="mt-3 flex items-center justify-between text-sm text-[var(--color-ink-muted)]">
       <span className="tnum">
         Page {page} of {totalPages} Â· {total} {unit}
@@ -289,6 +296,129 @@ function Pager({ page, totalPages, total, unit, onPage }: { page: number; totalP
           Next â†’
         </Button>
       </span>
+    </div>
+  )
+}
+
+/**
+ * Offline customer view: overview + statement assembled from the 30-day
+ * cache. Recording, editing and new bills need a connection — collecting
+ * money against a stale balance would be guessing, so those stay online-only.
+ */
+function OfflineCustomerDetail({ id }: { id: string }) {
+  const [view, setView] = useState<CachedCustomerView | null | undefined>(undefined)
+
+  useEffect(() => {
+    customerDetailFromCache(id).then(setView).catch(() => setView(null))
+  }, [id])
+
+  if (view === undefined) {
+    return (
+      <div aria-busy="true">
+        <PageTitle>Customer</PageTitle>
+        <div className="mt-4">
+          <SkeletonList rows={5} />
+        </div>
+      </div>
+    )
+  }
+
+  if (!view) {
+    return (
+      <div>
+        <PageTitle>Customer</PageTitle>
+        <div className="mt-4">
+          <EmptyState
+            icon="users"
+            title="Not in the offline cache"
+            description="This customer has no activity in the last 30 days, or the device never synced. Connect once to download them."
+          />
+          <p className="mt-3 text-sm">
+            <Link className={`underline underline-offset-2 ${focusRing}`} to="/customers">
+              Back to customers
+            </Link>
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  const { customer: c, stats: s, invoices, statement } = view
+
+  return (
+    <div>
+      <p className="mb-1 text-sm">
+        <Link className={`text-[var(--color-ink-muted)] underline underline-offset-2 hover:no-underline ${focusRing}`} to="/customers">
+          ? Customers
+        </Link>
+      </p>
+      <PageTitle>{c.name}</PageTitle>
+      <PageHint className="mb-4">Offline view — figures through the last sync. Payments and edits need a connection.</PageHint>
+
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+        <Stat label="Lifetime sales" footnote={`${s.invoiceCount} bills (30 days)`}>
+          <span className="tnum">{money(s.totalSales)}</span>
+        </Stat>
+        <Stat label="Paid" footnote="Verified payment records">
+          <span className="tnum">{money(s.totalPaid)}</span>
+        </Stat>
+        <Stat label="Outstanding" tone={s.outstanding > 0 ? "warn" : "default"}>
+          <span className="tnum">{money(s.outstanding)}</span>
+        </Stat>
+        <Stat label="Statement balance" footnote="Debits minus credits">
+          <span className="tnum">{money(statement.balance)}</span>
+        </Stat>
+      </div>
+
+      <h2 className="mb-2 mt-6 font-display text-lg font-semibold text-[var(--color-ink)]">Bills (30 days)</h2>
+      {!invoices.length ? (
+        <EmptyState compact icon="receipt" title="No recent bills" description="Nothing billed to them in the last 30 days." />
+      ) : (
+        <Card padded={false} className="overflow-hidden">
+          <ul className="divide-y divide-[var(--color-border)]">
+            {invoices.map((inv: any) => (
+              <li key={inv.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 text-sm">
+                <span className="tnum font-medium text-[var(--color-ink)]">{inv.invoiceNumber}</span>
+                <span className="tnum text-xs text-[var(--color-ink-subtle)]">{new Date(inv.issueDate).toLocaleDateString("en-IN")}</span>
+                <span className="tnum ml-auto text-[var(--color-ink)]">{money(inv.grandTotal)}</span>
+                <Badge tone={inv.status === "void" ? "bad" : (inv.amountPaid || 0) > 0 ? "ok" : "muted"}>
+                  <span className="capitalize">{inv.status}</span>
+                </Badge>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
+      <h2 className="mb-2 mt-6 font-display text-lg font-semibold text-[var(--color-ink)]">Statement</h2>
+      {!statement.entries.length ? (
+        <EmptyState compact icon="receipt" title="Nothing to state yet" description="No activity in the last 30 days." />
+      ) : (
+        <Card padded={false} className="overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-[var(--color-border)] text-left text-xs uppercase tracking-wide text-[var(--color-ink-muted)]">
+                <th scope="col" className="px-4 py-2 font-medium">Date</th>
+                <th scope="col" className="px-4 py-2 font-medium">Document</th>
+                <th scope="col" className="px-4 py-2 text-right font-medium">Debit</th>
+                <th scope="col" className="px-4 py-2 text-right font-medium">Credit</th>
+                <th scope="col" className="px-4 py-2 text-right font-medium">Balance</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[var(--color-border)]">
+              {statement.entries.map((e: any, i: number) => (
+                <tr key={`${e.date}-${e.doc}-${i}`}>
+                  <td className="tnum px-4 py-2 text-[var(--color-ink-muted)]">{new Date(e.date).toLocaleDateString("en-IN")}</td>
+                  <td className="px-4 py-2 text-[var(--color-ink)]">{e.doc}</td>
+                  <td className="tnum px-4 py-2 text-right text-[var(--color-ink)]">{e.debit ? money(e.debit) : "—"}</td>
+                  <td className="tnum px-4 py-2 text-right text-[var(--color-ink)]">{e.credit ? money(e.credit) : "—"}</td>
+                  <td className="tnum px-4 py-2 text-right font-medium text-[var(--color-ink)]">{money(e.balance)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
     </div>
   )
 }

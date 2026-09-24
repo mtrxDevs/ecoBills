@@ -56,9 +56,21 @@ export async function salesRoutes(app: FastifyInstance) {
     const subtotal = resolved.reduce((s, r) => s + r.subtotal, 0)
     const taxTotal = resolved.reduce((s, r) => s + r.tax, 0)
 
+    // Idempotent replay: an offline draft retried after an ambiguous failure
+    // (timeout with unknown outcome) returns the original invoice — never a twin.
+    if (b.clientKey) {
+      const existing = await prisma.invoice.findUnique({
+        where: { businessId_clientKey: { businessId: bid, clientKey: b.clientKey } },
+        include: { lines: true },
+      })
+      if (existing) return { ...existing, replayed: true }
+    }
+
     const fy = financialYear(b.issueDate ? new Date(b.issueDate) : new Date())
-    const invoice = await prisma.$transaction(
-      async (tx) => {
+    let invoice
+    try {
+      invoice = await prisma.$transaction(
+        async (tx) => {
         // 1. Lock item rows in deterministic order to serialize stock checks & prevent overselling
         await tx.$queryRaw`
           SELECT id FROM "Item"
@@ -114,6 +126,7 @@ export async function salesRoutes(app: FastifyInstance) {
           billToGstin: customer?.gstin ?? null,
           billToAddress: customer?.address ?? null,
           billToState: customer?.state ?? null,
+          clientKey: b.clientKey ?? null,
           subtotal, taxTotal, grandTotal: subtotal + taxTotal,
           lines: {
             create: resolved.map((r) => ({
@@ -143,7 +156,19 @@ export async function salesRoutes(app: FastifyInstance) {
         tx,
       )
       return inv
-    }, { maxWait: 15000, timeout: 20000 })
+      }, { maxWait: 15000, timeout: 20000 })
+    } catch (e: any) {
+      // Lost the race with an identical retry (same clientKey): return the
+      // winner instead of a 500. The unique constraint is the arbiter.
+      if (b.clientKey && (e?.code === 'P2002' || String(e?.message || '').includes('clientKey'))) {
+        const winner = await prisma.invoice.findUnique({
+          where: { businessId_clientKey: { businessId: bid, clientKey: b.clientKey } },
+          include: { lines: true },
+        })
+        if (winner) return { ...winner, replayed: true }
+      }
+      throw e
+    }
 
     return invoice
 

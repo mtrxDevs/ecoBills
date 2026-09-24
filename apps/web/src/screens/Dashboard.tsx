@@ -17,6 +17,8 @@ import {
 } from '@ecobills/ui'
 import { api, money } from '../lib/api'
 import { useMe } from '../lib/store'
+import { useNet } from '../lib/offline/net'
+import { summaryFromCache, syncedAt } from '../lib/offline/sync'
 
 /**
  * Time-aware greeting. The v0.1.1 heading hardcoded "Good morning" with a sun
@@ -31,14 +33,37 @@ function greeting(hour: number) {
 
 export function Dashboard() {
   const { me } = useMe()
+  const online = useNet((s) => s.online)
   // Unchanged data source and shape: GET /dashboard/summary.
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['dash'],
     queryFn: () => api.get('/dashboard/summary'),
+    retry: online ? 3 : false,
   })
+  // Offline reads come through a query like everything else — no
+  // setState-in-effect, no parallel state to drift out of sync.
+  const offlineQ = useQuery({
+    queryKey: ['dash-offline'],
+    queryFn: async () => ({ summary: await summaryFromCache(), age: await syncedAt() }),
+    enabled: !online && (isError || !data),
+    retry: false,
+    staleTime: 30000,
+  })
+  const offlineView = !online && (isError || !data)
+  const view = offlineView ? offlineQ.data?.summary : data
+  const cacheAge = offlineQ.data?.age ?? null
 
-  if (isLoading) return <DashboardSkeleton />
-  if (isError || !data) {
+  if (isLoading && online) return <DashboardSkeleton />
+  if ((isError || !data) && !view) {
+    if (!online) {
+      return (
+        <EmptyState
+          icon="trend"
+          title="No offline data yet"
+          description="Connect once so the last 30 days download to this device — then the dashboard works without internet."
+        />
+      )
+    }
     return (
       <ErrorState
         title="Could not load your dashboard"
@@ -49,7 +74,7 @@ export function Dashboard() {
     )
   }
 
-  const lowStock: any[] = data.lowStock || []
+  const lowStock: any[] = view?.lowStock || []
 
   return (
     <div>
@@ -57,22 +82,27 @@ export function Dashboard() {
         {greeting(new Date().getHours())}
         {me?.user?.name ? `, ${me.user.name.split(' ')[0]}` : ''}
       </PageTitle>
-      <PageHint className="mb-4">Here's your shop at a glance.</PageHint>
+      <PageHint className="mb-4">
+        Here's your shop at a glance.
+        {offlineView && view ? (
+          <> Data through {cacheAge ? new Date(cacheAge).toLocaleString('en-IN') : 'the last sync'} — offline.</>
+        ) : null}
+      </PageHint>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <Stat
           label="Today's sales"
           footnote={
             <>
-              <CountUp value={data.todayInvoices} /> {data.todayInvoices === 1 ? 'bill' : 'bills'} today
+              <CountUp value={view.todayInvoices} /> {view.todayInvoices === 1 ? 'bill' : 'bills'} today
             </>
           }
         >
-          <CountUp value={data.todaySales} format={(n) => money(n)} />
+          <CountUp value={view.todaySales} format={(n) => money(n)} />
         </Stat>
 
         <Stat label="Low stock" tone="warn" footnote="Items at or below reorder level">
-          <CountUp value={data.lowStockCount} />
+          <CountUp value={view.lowStockCount} />
         </Stat>
 
         <Stat
@@ -86,7 +116,7 @@ export function Dashboard() {
             </Link>
           }
         >
-          <CountUp value={data.pendingOrders} />
+          <CountUp value={view.pendingOrders} />
         </Stat>
       </div>
 

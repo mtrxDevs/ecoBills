@@ -15,6 +15,9 @@ import { Reports } from './screens/Reports'
 import { Settings } from './screens/Settings'
 import { api } from './lib/api'
 import { useMe } from './lib/store'
+import { OfflineBanner } from './components/OfflineBanner'
+import { startNetMonitor } from './lib/offline/net'
+import { refreshSnapshot } from './lib/offline/sync'
 
 const DASHBOARD_ONLY = (import.meta as any).env?.VITE_DASHBOARD_ONLY === 'true'
 const qc = new QueryClient()
@@ -55,10 +58,25 @@ function Guard({ children }: { children: JSX.Element }) {
   const { me, setMe } = useMe()
   const nav = useNavigate()
   useEffect(() => {
-    if (!me) api.get('/auth/me').then(setMe).catch(() => nav('/login'))
+    startNetMonitor()
+    if (!me) {
+      api
+        .get('/auth/me')
+        .then((m) => {
+          setMe(m)
+          // Fresh 30-day cache for offline reads; best-effort, never blocks.
+          refreshSnapshot().catch(() => {})
+        })
+        .catch(() => nav('/login'))
+    }
   }, [me, nav, setMe])
   if (!me) return <BootSkeleton />
-  return <Layout>{children}</Layout>
+  return (
+    <Layout>
+      <OfflineBanner />
+      {children}
+    </Layout>
+  )
 }
 
 export function App() {
