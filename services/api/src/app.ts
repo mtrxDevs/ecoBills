@@ -21,7 +21,15 @@ export async function buildApp(opts: { logger?: boolean } = {}): Promise<Fastify
   const app = Fastify({ logger: opts.logger ?? false })
 
   await app.register(cookie)
-  await app.register(cors, { origin: process.env.APP_URL?.split(',') || true, credentials: true })
+  const allowedOrigins = [
+    ...(process.env.APP_URL?.split(',').map((s) => s.trim()).filter(Boolean) || []),
+    // The Tauri desktop shell loads the UI from its own scheme, not https —
+    // allow it explicitly so the packaged app can reach this API with cookies.
+    // (Cookies stay partitioned per app; no website can ride this allowance.)
+    'tauri://localhost',
+    'https://tauri.localhost',
+  ]
+  await app.register(cors, { origin: allowedOrigins.length > 2 ? allowedOrigins : true, credentials: true })
   await app.register(rateLimit, { max: 300, timeWindow: '1 minute' })
 
   app.get('/health', async () => ({ ok: true, time: new Date().toISOString() }))

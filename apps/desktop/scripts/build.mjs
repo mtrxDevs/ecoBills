@@ -66,5 +66,35 @@ try {
 }
 
 console.log(`[desktop] Rust toolchain found — running \`tauri build\` (${confPath}).`)
-const build = spawnSync(process.execPath, [tauriCli, 'build'], { cwd: appDir, stdio: 'inherit' })
+
+// The packaged UI is baked at build time: a release bundle must point at the
+// LIVE api, not localhost. Accept either variable name, then forward it as
+// VITE_API_URL so `beforeBuildCommand` picks it up through env inheritance.
+const apiUrl = (process.env.ECOBILLS_API_URL || process.env.VITE_API_URL || '').trim()
+const requireRelease = process.env.ECOBILLS_REQUIRE_DESKTOP === '1'
+if (!apiUrl || !/^https:\/\//.test(apiUrl)) {
+  if (requireRelease) {
+    console.error('')
+    console.error('[desktop] refusing to package: no production API URL provided.')
+    console.error('[desktop] the desktop UI is compiled with its API origin baked in.')
+    console.error('[desktop] set it first, e.g.:')
+    console.error('[desktop]   $env:ECOBILLS_API_URL="https://<your-app>.onrender.com"')
+    console.error('[desktop]   pnpm --filter @ecobills/desktop build')
+    console.error('')
+    process.exit(1)
+  }
+  console.warn('')
+  console.warn('[desktop] WARNING: no ECOBILLS_API_URL set — the bundle will talk to')
+  console.warn('[desktop] localhost (dev/test only). Set ECOBILLS_API_URL for a real release,')
+  console.warn('[desktop] or ECOBILLS_REQUIRE_DESKTOP=1 to turn this warning into a failure.')
+  console.warn('')
+} else {
+  console.log(`[desktop] web UI will target ${apiUrl}`)
+}
+
+const build = spawnSync(process.execPath, [tauriCli, 'build'], {
+  cwd: appDir,
+  stdio: 'inherit',
+  env: { ...process.env, ...(apiUrl && /^https:\/\//.test(apiUrl) ? { VITE_API_URL: apiUrl } : {}) },
+})
 process.exit(build.status ?? 1)
