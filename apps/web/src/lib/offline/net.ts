@@ -1,12 +1,15 @@
 import { create } from 'zustand'
 
+export const OFFLINE_ENABLED =
+  (import.meta as any).env?.VITE_DESKTOP_BUILD === 'true' || (import.meta as any).env?.MODE === 'test'
+
 // Single shared connectivity state. navigator.onLine lies behind captive
 // portals, so a cheap heartbeat against /api/health decides. One monitor for
 // the whole app (started once in App); screens just read the flag.
 type NetState = { online: boolean; lastBeat: number; set: (online: boolean) => void }
 
 export const useNet = create<NetState>((set) => ({
-  online: typeof navigator === 'undefined' ? true : navigator.onLine,
+  online: !OFFLINE_ENABLED || typeof navigator === 'undefined' ? true : navigator.onLine,
   lastBeat: 0,
   set: (online) => set({ online, lastBeat: Date.now() }),
 }))
@@ -14,7 +17,7 @@ export const useNet = create<NetState>((set) => ({
 let started = false
 
 export function startNetMonitor() {
-  if (started || typeof window === 'undefined') return
+  if (!OFFLINE_ENABLED || started || typeof window === 'undefined') return
   started = true
   // App-lifetime singleton: intentionally never stopped.
   const alive = true

@@ -95,6 +95,10 @@ if (!apiUrl || !/^https:\/\//.test(apiUrl)) {
 const build = spawnSync(process.execPath, [tauriCli, 'build'], {
   cwd: appDir,
   stdio: 'inherit',
-  env: { ...process.env, ...(apiUrl && /^https:\/\//.test(apiUrl) ? { VITE_API_URL: apiUrl } : {}) },
+  env: {
+    ...process.env,
+    VITE_DESKTOP_BUILD: 'true',
+    ...(apiUrl && /^https:\/\//.test(apiUrl) ? { VITE_API_URL: apiUrl } : {}),
+  },
 })
 process.exit(build.status ?? 1)

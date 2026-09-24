@@ -1,5 +1,6 @@
 import { api } from '../api'
 import { putAll, readAll, putMeta, readMeta, outboxPut, outboxRemove } from './db'
+import { OFFLINE_ENABLED } from './net'
 
 // Sync protocol (v1, documented in DECISIONS.md):
 // - READS: on login and on demand, GET /sync/snapshot (30d, bounded) replaces
@@ -33,6 +34,7 @@ export function newClientKey() {
 }
 
 export async function refreshSnapshot(): Promise<string> {
+  if (!OFFLINE_ENABLED) return ''
   const snap = await api.get('/sync/snapshot')
   await putAll('items', snap.items || [])
   await putAll('customers', snap.customers || [])
@@ -46,6 +48,7 @@ export async function refreshSnapshot(): Promise<string> {
 }
 
 export async function syncedAt(): Promise<string | null> {
+  if (!OFFLINE_ENABLED) return null
   return readMeta<string>('syncedAt')
 }
 
@@ -62,6 +65,7 @@ export async function enqueueDraft(op: Omit<DraftOp, 'opId' | 'createdAt' | 'cli
 }
 
 export async function listDrafts(): Promise<DraftOp[]> {
+  if (!OFFLINE_ENABLED) return []
   const rows = await readAll<DraftOp>('outbox')
   return rows.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
 }
@@ -73,6 +77,7 @@ export async function syncOutbox(
   post: (path: string, body: unknown) => Promise<any>,
   onProgress?: (done: number, total: number) => void,
 ): Promise<SyncResult> {
+  if (!OFFLINE_ENABLED) return { sent: 0, failed: [] }
   const ops = await listDrafts()
   const failed: Array<{ opId: string; error: string }> = []
   let sent = 0
@@ -99,6 +104,7 @@ export async function syncOutbox(
 /** One shared sync path for the banner, Billing auto-sync, and Retry buttons:
  * push drafts, then refresh the snapshot so the cache reflects what landed. */
 export async function pushAndRefresh(): Promise<SyncResult> {
+  if (!OFFLINE_ENABLED) return { sent: 0, failed: [] }
   const r = await syncOutbox((p, b) => api.post(p, b))
   await refreshSnapshot().catch(() => {})
   return r
@@ -106,6 +112,7 @@ export async function pushAndRefresh(): Promise<SyncResult> {
 
 /** Dashboard summary derived from cache — same shape as /dashboard/summary. */
 export async function summaryFromCache() {
+  if (!OFFLINE_ENABLED) return null
   const [items, invoices, orders] = await Promise.all([
     readAll<any>('items'),
     readAll<any>('invoices'),
@@ -128,6 +135,7 @@ export async function summaryFromCache() {
 
 /** Per-customer outstanding from cached invoices — list display only. */
 export async function outstandingByCustomer(): Promise<Map<string, { total: number; paid: number; due: number }>> {
+  if (!OFFLINE_ENABLED) return new Map()
   const invoices = await readAll<any>('invoices')
   const map = new Map<string, { total: number; paid: number; due: number }>()
   for (const inv of invoices) {
@@ -150,6 +158,7 @@ export type CachedCustomerView = {
 
 /** Customer detail assembled from cache. Mirrors the server shapes. */
 export async function customerDetailFromCache(customerId: string): Promise<CachedCustomerView | null> {
+  if (!OFFLINE_ENABLED) return null
   const [customers, invoices] = await Promise.all([readAll<any>('customers'), readAll<any>('invoices')])
   const customer = customers.find((c: any) => c.id === customerId)
   if (!customer) return null

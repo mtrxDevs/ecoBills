@@ -34,5 +34,9 @@ try {
   process.exit(1)
 }
 
-const dev = spawnSync(process.execPath, [tauriCli, 'dev'], { cwd: appDir, stdio: 'inherit' })
+const dev = spawnSync(process.execPath, [tauriCli, 'dev'], {
+  cwd: appDir,
+  stdio: 'inherit',
+  env: { ...process.env, VITE_DESKTOP_BUILD: 'true' },
+})
 process.exit(dev.status ?? 1)

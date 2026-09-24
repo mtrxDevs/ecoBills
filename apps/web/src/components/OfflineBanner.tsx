@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { IconWarning, Button, useToast } from '@ecobills/ui'
-import { useNet } from '../lib/offline/net'
+import { OFFLINE_ENABLED, useNet } from '../lib/offline/net'
 import { syncedAt, listDrafts, pushAndRefresh } from '../lib/offline/sync'
 
 /**
@@ -21,6 +21,7 @@ export function OfflineBanner() {
   const metaQ = useQuery({
     queryKey: ['offline-meta'],
     queryFn: async () => ({ age: await syncedAt(), pending: (await listDrafts()).length }),
+    enabled: OFFLINE_ENABLED,
     refetchInterval: 15000,
     staleTime: 5000,
   })
@@ -55,7 +56,7 @@ export function OfflineBanner() {
     }
   }
 
-  if (online && pending === 0) return null
+  if (!OFFLINE_ENABLED || (online && pending === 0)) return null
 
   return (
     <div

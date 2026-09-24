@@ -2,6 +2,11 @@
 
 Log genuine ambiguities here instead of blocking. Newest first.
 
+## 2026-09-24 — Offline fallback is desktop-only (agent)
+- The hosted web app remains a normal online product: it does not start the connectivity monitor, read/write the IndexedDB cache, show the offline banner, or queue invoice drafts.
+- The Windows Tauri installer still contains the complete `apps/web` UI locally. Its build and dev wrappers set `VITE_DESKTOP_BUILD=true`; that flag enables the existing snapshot/outbox fallback only in the desktop bundle.
+- Desktop and web both use the Fastify API for authentication and connected synchronization. The client does not connect directly to Supabase; the API remains the only database boundary.
+
 ## 2026-09-22 — Supabase DB hosting: session pooler, no schema change (agent)
 - **Offline desktop (Phase 1):** 30-day snapshot endpoint + IndexedDB cache, invoice drafts with clientKey idempotency, outbox sync on reconnect. Deliberate limits: cache is read-only display (always age-labeled), payments/receives/settings stay online-only, drafts get server numbers at sync (never locally). `Invoice.clientKey` unique per business; replays and lost races return the original. Full gates green (47 web+api tests + 10 site).
 - **Login failure diagnosis (support):** "Invalid email or password" is the generic message for ALL login failures by design. In this case the installed desktop app was a localhost build with no local API running — the password was never checked. Fixed by shipping the production-URL release installer. 2FA left ON (untouched); with the right app the code screen appears normally. Support-disabled 2FA remains a last resort, not a first step.
