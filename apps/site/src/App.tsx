@@ -1,5 +1,6 @@
 import { Fragment } from 'react'
 import { Hero3D } from './components/Hero3D'
+import { DashboardTour } from './components/DashboardTour'
 import { SITE } from './site'
 
 const FEATURES = [
@@ -82,6 +83,7 @@ export function App() {
             </span>
           </a>
           <nav className="nav-links" aria-label="Sections">
+            <a href="#tour">Tour</a>
             <a href="#features">Features</a>
             <a href="#inside">Inside the app</a>
             <a href="#pricing">Pricing</a>
@@ -123,6 +125,17 @@ export function App() {
               </div>
               <p className="hero-note tnum">Free pilot · No card · Your data stays yours</p>
             </div>
+          </div>
+        </section>
+
+        <section className="block" id="tour" aria-label="Guided tour">
+          <div className="wrap">
+            <h2 className="section-title font-display">Walk the dashboard in 3D</h2>
+            <p className="section-sub">
+              Every destination, one stop at a time — the camera moves, the module lights up, the callout says what
+              it is. Pick a stop or let it tour itself.
+            </p>
+            <DashboardTour />
           </div>
         </section>
 
