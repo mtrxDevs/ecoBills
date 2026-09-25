@@ -27,6 +27,7 @@ export async function buildApp(opts: { logger?: boolean } = {}): Promise<Fastify
     // allow it explicitly so the packaged app can reach this API with cookies.
     // (Cookies stay partitioned per app; no website can ride this allowance.)
     'tauri://localhost',
+    'http://tauri.localhost',
     'https://tauri.localhost',
   ]
   await app.register(cors, { origin: allowedOrigins.length > 2 ? allowedOrigins : true, credentials: true })
