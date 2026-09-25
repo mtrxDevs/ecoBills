@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '../..', '')
+  const neonAuthUrl = process.env.VITE_NEON_AUTH_URL || process.env.NEON_AUTH_BASE_URL || env.VITE_NEON_AUTH_URL || env.NEON_AUTH_BASE_URL || ''
   return {
     plugins: [react()],
     // Keep the workspace's root .env as the single local configuration source.
@@ -20,7 +21,7 @@ export default defineConfig(({ mode }) => {
       __DASHBOARD_ONLY__: JSON.stringify(env.VITE_DASHBOARD_ONLY === 'true'),
       // Existing Neon project config uses NEON_AUTH_BASE_URL; allow it to
       // bootstrap the public alias without exposing any server-only values.
-      'import.meta.env.VITE_NEON_AUTH_URL': JSON.stringify(env.VITE_NEON_AUTH_URL || env.NEON_AUTH_BASE_URL || ''),
+      'import.meta.env.VITE_NEON_AUTH_URL': JSON.stringify(neonAuthUrl),
     },
   }
 })
