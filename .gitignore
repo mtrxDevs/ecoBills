@@ -16,3 +16,4 @@ ios/
 *.aab
 .DS_Store
 Thumbs.db
+.neon
