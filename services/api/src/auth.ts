@@ -34,7 +34,10 @@ async function verifyBearer(token: string): Promise<NeonIdentity> {
     jwks = createRemoteJWKSet(new URL(jwksUrlValue))
     jwksUrl = jwksUrlValue
   }
-  const { payload } = await jwtVerify(token, jwks, { issuer: baseUrl })
+  // Managed Neon Auth JWTs use the Auth service origin as their issuer. The
+  // configured base URL also contains the branch/database auth path.
+  const issuer = new URL(baseUrl).origin
+  const { payload } = await jwtVerify(token, jwks, { issuer })
   if (typeof payload.sub !== 'string' || typeof payload.email !== 'string') throw new Error('invalid_neon_identity')
   return {
     id: payload.sub,
