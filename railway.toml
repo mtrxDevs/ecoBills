@@ -1,6 +1,6 @@
 [build]
 builder = "RAILPACK"
-buildCommand = "pnpm --filter @ecobills/prisma generate && pnpm --filter @ecobills/web build && pnpm --filter @ecobills/api build"
+buildCommand = "pnpm --filter @ecobills/prisma generate && pnpm --filter @ecobills/types build && pnpm --filter @ecobills/ui build && pnpm --filter @ecobills/web build && pnpm --filter @ecobills/api build"
 
 [deploy]
 startCommand = "pnpm --filter @ecobills/api start"
