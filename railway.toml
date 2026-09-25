@@ -1,0 +1,10 @@
+[build]
+builder = "RAILPACK"
+buildCommand = "pnpm --filter @ecobills/prisma generate && pnpm --filter @ecobills/web build && pnpm --filter @ecobills/api build"
+
+[deploy]
+startCommand = "pnpm --filter @ecobills/api start"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
