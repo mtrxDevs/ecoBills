@@ -1,35 +1,19 @@
 import { useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
-import { motion } from 'framer-motion'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Button,
   ComboboxField,
   GlassSurface,
   IconAlert,
-  IconClose,
-  IconPlus,
   INDIAN_STATES,
   TextField,
   cn,
   focusRing,
-  pageTransition,
-  useReducedMotion,
 } from '@ecobills/ui'
-import { api, errorCode } from '../lib/api'
+import { api } from '../lib/api'
+import { authClient } from '../lib/auth'
 import { useMe } from '../lib/store'
 
-/**
- * Auth. Endpoints, payloads and redirects are unchanged:
- *   POST /auth/login → GET /auth/me → navigate('/')
- *   POST /auth/signup → GET /auth/me → POST /items (best effort) → navigate('/')
- *
- * Presentation changes: fields are wired through <Field> (blur validation,
- * aria-describedby, role="alert"), the submit buttons carry the shared
- * loading/success states, and the 3-step wizard cross-fades between steps using
- * the page-transition tokens instead of swapping instantly.
- */
-
-/** The shared single-column shell for both auth screens. */
 function AuthShell({ children, wide = false }: { children: React.ReactNode; wide?: boolean }) {
   return (
     <div className={cn('mx-auto w-full px-4', wide ? 'max-w-md' : 'max-w-sm')} style={{ paddingTop: '12vh' }}>
@@ -49,296 +33,95 @@ function BrandMark({ subtitle }: { subtitle: string }) {
   )
 }
 
-/** Inline, designed form-level error. Was already role="alert"; now it is styled. */
 function FormError({ message }: { message: string }) {
   if (!message) return null
   return (
-    <p
-      role="alert"
-      className="flex items-start gap-2 rounded-[var(--radius-control)] bg-[var(--color-danger-tint)] p-3 text-sm font-medium text-[var(--color-danger-text)]"
-    >
+    <p role="alert" className="flex items-start gap-2 rounded-[var(--radius-control)] bg-[var(--color-danger-tint)] p-3 text-sm font-medium text-[var(--color-danger-text)]">
       <IconAlert className="mt-0.5 shrink-0 text-base" />
       <span>{message}</span>
     </p>
   )
 }
 
+async function finishAuth(setMe: (me: any) => void, nav: (path: string) => void) {
+  const pending = sessionStorage.getItem('ecobills_pending_bootstrap')
+  if (pending) {
+    await api.post('/auth/bootstrap', JSON.parse(pending))
+    sessionStorage.removeItem('ecobills_pending_bootstrap')
+  }
+  setMe(await api.get('/auth/me'))
+  nav('/')
+}
+
 export function Login() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [forgot, setForgot] = useState(false)
+  const [sent, setSent] = useState(false)
   const [err, setErr] = useState('')
   const [pending, setPending] = useState(false)
-  // Second step appears only when the account has two-step verification on.
-  const [challengeToken, setChallengeToken] = useState<string | null>(null)
-  const [code, setCode] = useState('')
-  const [codeErr, setCodeErr] = useState('')
-  const [resent, setResent] = useState(false)
-  // Forgot-password mode: email → code + new password → done.
-  const [forgot, setForgot] = useState(false)
-  const [forgotSent, setForgotSent] = useState(false)
-  const [forgotToken, setForgotToken] = useState<string | null>(null)
-  const [newPassword, setNewPassword] = useState('')
-  const [resetDone, setResetDone] = useState(false)
   const nav = useNavigate()
   const { setMe } = useMe()
 
-  async function finishLogin() {
-    const me = await api.get('/auth/me')
-    setMe(me)
-    nav('/')
-  }
-
-  async function submitPassword(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault()
     setErr('')
     setPending(true)
     try {
-      const res = await api.post('/auth/login', { email, password })
-      if (res?.twoFactorRequired) {
-        setChallengeToken(res.challengeToken)
-        setCode('')
-        setCodeErr('')
-        setResent(false)
-      } else {
-        await finishLogin()
-      }
-    } catch {
-      setErr('Invalid email or password.')
+      const result = await authClient.signIn.email({ email, password })
+      if (result.error) throw new Error(result.error.message || 'Invalid email or password.')
+      await finishAuth(setMe, nav)
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : 'Invalid email or password.')
     } finally {
       setPending(false)
     }
   }
 
-  async function submitCode(codeValue: string) {
-    if (!challengeToken || codeValue.length !== 6 || pending) return
-    setCodeErr('')
-    setPending(true)
-    try {
-      await api.post('/auth/2fa/verify', { challengeToken, code: codeValue })
-      await finishLogin()
-    } catch (e) {
-      const code = errorCode(e)
-      if (code === 'challenge_expired') setCodeErr('That code expired. Request a new one below.')
-      else if (code === 'challenge_locked') setCodeErr('Too many wrong tries. Request a new code to try again.')
-      else if (code === 'invalid_challenge') {
-        setChallengeToken(null)
-        setErr('That sign-in attempt expired. Enter your password again.')
-      } else setCodeErr(e instanceof Error ? e.message : 'Wrong code. Check the email and try again.')
-    } finally {
-      setPending(false)
-    }
-  }
-
-  async function resend() {
-    if (!challengeToken || pending) return
-    setPending(true)
-    try {
-      const res = await api.post('/auth/2fa/resend', { challengeToken })
-      setChallengeToken(res.challengeToken)
-      setCode('')
-      setCodeErr('')
-      setResent(true)
-    } catch {
-      setChallengeToken(null)
-      setErr('That sign-in attempt expired. Enter your password again.')
-    } finally {
-      setPending(false)
-    }
-  }
-
-  function backToLogin() {
-    setChallengeToken(null)
-    setForgot(false)
-    setForgotSent(false)
-    setForgotToken(null)
-    setNewPassword('')
-    setResetDone(false)
-    setCode('')
-    setCodeErr('')
-    setErr('')
-  }
-
-  async function sendResetCode(e: React.FormEvent) {
+  async function requestReset(e: React.FormEvent) {
     e.preventDefault()
     setErr('')
     setPending(true)
     try {
-      const res = await api.post('/auth/forgot-password', { email })
-      // Known inboxes come back with a challenge; unknown ones get a bare ok
-      // (the server won't say which) — either way the message below is true.
-      setForgotToken(res?.challengeToken || null)
-      setForgotSent(true)
-      setCode('')
-      setCodeErr('')
-      setNewPassword('')
-      setResent(false)
-    } catch {
-      setErr('Could not send a code. Check the connection and try again.')
+      const result = await authClient.requestPasswordReset({ email, redirectTo: `${window.location.origin}/reset-password` })
+      if (result.error) throw new Error(result.error.message || 'Could not send the recovery email.')
+      setSent(true)
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : 'Could not send the recovery email.')
     } finally {
       setPending(false)
     }
   }
 
-  async function submitNewPassword(e: React.FormEvent) {
-    e.preventDefault()
-    if (!forgotToken || code.length !== 6 || newPassword.length < 8 || pending) return
-    setCodeErr('')
-    setPending(true)
-    try {
-      await api.post('/auth/reset-password', { challengeToken: forgotToken, code, newPassword })
-      setResetDone(true)
-    } catch (err2) {
-      const c = errorCode(err2)
-      if (c === 'challenge_expired') setCodeErr('That code expired. Request a new one below.')
-      else if (c === 'challenge_locked') setCodeErr('Too many wrong tries. Request a new code to try again.')
-      else if (c === 'invalid_challenge') {
-        setForgotToken(null)
-        setForgotSent(false)
-        setErr('That attempt expired. Start again below.')
-      } else setCodeErr(err2 instanceof Error ? err2.message : 'Wrong code. Check the email and try again.')
-    } finally {
-      setPending(false)
-    }
-  }
-
-  async function resendReset() {
-    if (!forgotToken || pending) return
-    setPending(true)
-    try {
-      const res = await api.post('/auth/2fa/resend', { challengeToken: forgotToken })
-      setForgotToken(res.challengeToken)
-      setCode('')
-      setCodeErr('')
-      setResent(true)
-    } catch {
-      setForgotToken(null)
-      setForgotSent(false)
-      setErr('That attempt expired. Start again below.')
-    } finally {
-      setPending(false)
-    }
-  }
-
-  // api.post throws the raw response body, so the server's error codes
-  // ('invalid_code', 'challenge_expired', …) are matched by substring below.
   return (
     <AuthShell>
       <BrandMark subtitle="Stock, billing & P&L for your shop." />
-      {challengeToken ? (
-        <form
-          className="flex flex-col gap-4"
-          noValidate
-          onSubmit={(e) => {
-            e.preventDefault()
-            submitCode(code)
-          }}
-        >
-          <p className="text-sm text-[var(--color-ink-muted)]">
-            Two-step verification is on for this account. Enter the 6-digit code sent to <b>{email}</b>.
-          </p>
-          <TextField
-            label="6-digit code"
-            inputProps={{ inputMode: 'numeric', autoComplete: 'one-time-code', maxLength: 6, autoFocus: true, placeholder: '••••••' }}
-            value={code}
-            onValueChange={(v) => {
-              const digits = v.replace(/\D/g, '').slice(0, 6)
-              setCode(digits)
-              if (digits.length === 6) void submitCode(digits)
-            }}
-            validate={(v) => (v.length === 6 ? undefined : 'Enter all 6 digits.')}
-          />
-          <FormError message={codeErr} />
-          <Button type="submit" loading={pending} loadingLabel="Verifying" disabled={code.length !== 6}>
-            Verify & log in
-          </Button>
-          <div className="flex items-center justify-between text-sm">
-            <button
-              type="button"
-              className={`rounded-[var(--radius-sm)] font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
-              onClick={resend}
-            >
-              Send a new code
-            </button>
-            <button
-              type="button"
-              className={`rounded-[var(--radius-sm)] text-[var(--color-ink-muted)] underline underline-offset-2 hover:no-underline ${focusRing}`}
-              onClick={() => {
-                setChallengeToken(null)
-                setCode('')
-                setCodeErr('')
-              }}
-            >
-              Use a different account
-            </button>
+      {forgot ? (
+        sent ? (
+          <div className="flex flex-col gap-4">
+            <p className="text-sm text-[var(--color-ink-muted)]">If that account exists, Neon Auth sent a password recovery link. Check your inbox and spam folder.</p>
+            <Button onClick={() => { setForgot(false); setSent(false); setErr('') }}>Back to log in</Button>
           </div>
-          {resent ? <p className="text-sm text-[var(--color-ink-muted)]">A new code is on its way.</p> : null}
-        </form>
-      ) : forgot ? (
-        <ForgotFlow
-          email={email}
-          setEmail={setEmail}
-          forgotSent={forgotSent}
-          forgotToken={forgotToken}
-          code={code}
-          setCode={setCode}
-          codeErr={codeErr}
-          newPassword={newPassword}
-          setNewPassword={setNewPassword}
-          resetDone={resetDone}
-          resent={resent}
-          pending={pending}
-          err={err}
-          onSend={sendResetCode}
-          onSubmit={submitNewPassword}
-          onResend={resendReset}
-          onBack={backToLogin}
-        />
+        ) : (
+          <form className="flex flex-col gap-4" onSubmit={requestReset}>
+            <p className="text-sm text-[var(--color-ink-muted)]">Enter your account email and Neon Auth will send a recovery link.</p>
+            <TextField label="Email" inputProps={{ type: 'email', autoComplete: 'username' }} value={email} onValueChange={setEmail} />
+            <FormError message={err} />
+            <Button type="submit" loading={pending} loadingLabel="Sending link" disabled={!email}>Send recovery link</Button>
+            <button type="button" className={`text-sm text-[var(--color-ink-muted)] underline ${focusRing}`} onClick={() => { setForgot(false); setErr('') }}>Back to log in</button>
+          </form>
+        )
       ) : (
-        <form className="flex flex-col gap-4" noValidate onSubmit={submitPassword}>
-          <TextField
-            label="Email"
-            inputProps={{ type: 'email', autoComplete: 'username', placeholder: 'you@shop.com' }}
-            value={email}
-            onValueChange={setEmail}
-            validate={(v) => (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ? undefined : 'Enter the email you signed up with.')}
-          />
-          <TextField
-            label="Password"
-            inputProps={{ type: 'password', autoComplete: 'current-password', placeholder: 'Password' }}
-            value={password}
-            onValueChange={setPassword}
-            validate={(v) => (v ? undefined : 'Enter your password.')}
-          />
+        <form className="flex flex-col gap-4" onSubmit={submit}>
+          <TextField label="Email" inputProps={{ type: 'email', autoComplete: 'username', placeholder: 'you@shop.com' }} value={email} onValueChange={setEmail} />
+          <TextField label="Password" inputProps={{ type: 'password', autoComplete: 'current-password' }} value={password} onValueChange={setPassword} />
           <FormError message={err} />
-          <Button type="submit" loading={pending} loadingLabel="Signing in" disabled={!email || !password}>
-            Log in
-          </Button>
-          <p className="text-center text-sm">
-            <button
-              type="button"
-              className={`rounded-[var(--radius-sm)] font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
-              onClick={() => {
-                setForgot(true)
-                setForgotSent(false)
-                setForgotToken(null)
-                setResetDone(false)
-                setErr('')
-                setCodeErr('')
-              }}
-            >
-              Forgot password?
-            </button>
-          </p>
+          <Button type="submit" loading={pending} loadingLabel="Signing in" disabled={!email || !password}>Log in</Button>
+          <button type="button" className={`text-sm font-medium text-[var(--color-accent-text)] underline ${focusRing}`} onClick={() => { setForgot(true); setErr('') }}>Forgot password?</button>
         </form>
       )}
       <p className="mt-4 text-sm text-[var(--color-ink-muted)]">
-        New here?{' '}
-        <Link
-          className={`rounded-[var(--radius-sm)] font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
-          to="/start"
-        >
-          Create your business
-        </Link>
+        New here? <Link className={`font-medium text-[var(--color-accent-text)] underline ${focusRing}`} to="/start">Create your business</Link>
       </p>
     </AuthShell>
   )
@@ -346,196 +129,40 @@ export function Login() {
 
 const STEPS = ['Business', 'Owner', 'Items']
 
-type ForgotProps = {
-  email: string
-  setEmail: (v: string) => void
-  forgotSent: boolean
-  forgotToken: string | null
-  code: string
-  setCode: (v: string) => void
-  codeErr: string
-  newPassword: string
-  setNewPassword: (v: string) => void
-  resetDone: boolean
-  resent: boolean
-  pending: boolean
-  err: string
-  onSend: (e: React.FormEvent) => void
-  onSubmit: (e: React.FormEvent) => void
-  onResend: () => void
-  onBack: () => void
-}
-
-/** Forgot-password flow: email → code + new password → done. Never reveals
- * whether the address has an account — the neutral message is true either way. */
-function ForgotFlow(p: ForgotProps) {
-  const backLink = (
-    <button
-      type="button"
-      className={`rounded-[var(--radius-sm)] text-sm text-[var(--color-ink-muted)] underline underline-offset-2 hover:no-underline ${focusRing}`}
-      onClick={p.onBack}
-    >
-      Back to log in
-    </button>
-  )
-
-  if (p.resetDone) {
-    return (
-      <div className="flex flex-col gap-4">
-        <p className="font-display text-lg font-semibold text-[var(--color-ink)]">Password changed</p>
-        <p className="text-sm text-[var(--color-ink-muted)]">
-          Log in with the new password. Every other session on this account was signed out.
-        </p>
-        <Button onClick={p.onBack}>Back to log in</Button>
-      </div>
-    )
-  }
-
-  if (!p.forgotSent) {
-    return (
-      <form className="flex flex-col gap-4" noValidate onSubmit={p.onSend}>
-        <p className="text-sm text-[var(--color-ink-muted)]">Enter your account email and we will send a 6-digit reset code.</p>
-        <TextField
-          label="Email"
-          inputProps={{ type: 'email', autoComplete: 'username', placeholder: 'you@shop.com' }}
-          value={p.email}
-          onValueChange={p.setEmail}
-          validate={(v) => (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ? undefined : 'Enter a valid email address.')}
-        />
-        <FormError message={p.err} />
-        <Button type="submit" loading={p.pending} loadingLabel="Sending code" disabled={!p.email}>
-          Send code
-        </Button>
-        {backLink}
-      </form>
-    )
-  }
-
-  if (!p.forgotToken) {
-    return (
-      <div className="flex flex-col gap-4">
-        <p className="text-sm text-[var(--color-ink-muted)]">If an account uses this email, a code is on its way. Check the inbox (and spam).</p>
-        {backLink}
-      </div>
-    )
-  }
-
-  return (
-    <form className="flex flex-col gap-4" noValidate onSubmit={p.onSubmit}>
-      <p className="text-sm text-[var(--color-ink-muted)]">
-        Enter the 6-digit code sent to <b>{p.email}</b>, then choose the new password.
-      </p>
-      <TextField
-        label="6-digit code"
-        inputProps={{ inputMode: 'numeric', autoComplete: 'one-time-code', maxLength: 6, autoFocus: true, placeholder: '••••••' }}
-        value={p.code}
-        onValueChange={(v) => p.setCode(v.replace(/\D/g, '').slice(0, 6))}
-        validate={(v) => (v.length === 6 ? undefined : 'Enter all 6 digits.')}
-      />
-      <TextField
-        label="New password"
-        hint="8 characters or more."
-        inputProps={{ type: 'password', autoComplete: 'new-password', placeholder: 'New password' }}
-        value={p.newPassword}
-        onValueChange={p.setNewPassword}
-        validate={(v) => (v.length >= 8 ? undefined : 'Use at least 8 characters.')}
-      />
-      <FormError message={p.codeErr} />
-      <Button type="submit" loading={p.pending} loadingLabel="Changing password" disabled={p.code.length !== 6 || p.newPassword.length < 8}>
-        Set new password
-      </Button>
-      <div className="flex items-center justify-between text-sm">
-        <button
-          type="button"
-          className={`rounded-[var(--radius-sm)] font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
-          onClick={p.onResend}
-        >
-          Send a new code
-        </button>
-        {backLink}
-      </div>
-      {p.resent ? <p className="text-sm text-[var(--color-ink-muted)]">A new code is on its way.</p> : null}
-    </form>
-  )
-}
-
 export function Start() {
   const [step, setStep] = useState(0)
   const [f, setF] = useState({ businessName: '', state: '', gstin: '', ownerName: '', email: '', password: '' })
   const [items, setItems] = useState([{ name: '', sku: '', salePrice: '' }])
   const [err, setErr] = useState('')
   const [pending, setPending] = useState(false)
-  // Email verification gates step 2: signup mints an unverified account and
-  // returns a challenge — the session (needed to save items) only exists
-  // after POST /auth/verify-email succeeds.
-  const [verifyToken, setVerifyToken] = useState<string | null>(null)
-  const [code, setCode] = useState('')
-  const [codeErr, setCodeErr] = useState('')
-  const [resent, setResent] = useState(false)
+  const [verificationNeeded, setVerificationNeeded] = useState(false)
   const nav = useNavigate()
   const { setMe } = useMe()
-  const reduce = useReducedMotion()
-  const stepTransition = pageTransition(reduce)
 
   async function signup() {
     setErr('')
     setPending(true)
     try {
-      const res = await api.post('/auth/signup', {
+      const result = await authClient.signUp.email({ email: f.email, password: f.password, name: f.ownerName })
+      if (result.error) throw new Error(result.error.message || 'Could not create account.')
+      sessionStorage.setItem('ecobills_pending_bootstrap', JSON.stringify({
         businessName: f.businessName,
         state: f.state,
         gstin: f.gstin || null,
         ownerName: f.ownerName,
-        email: f.email,
-        password: f.password,
-      })
-      if (res?.emailVerificationRequired) {
-        setVerifyToken(res.challengeToken)
-        setCode('')
-        setCodeErr('')
-        setResent(false)
-      } else {
-        // Defensive: current API always challenges; if that changes, continue.
-        setMe(await api.get('/auth/me'))
-        setStep(2)
+      }))
+      const token = await authClient.token()
+      if (!token.data?.token) {
+        setVerificationNeeded(true)
+        return
       }
-    } catch {
-      setErr('Could not create account. Is the email already used?')
-    } finally {
-      setPending(false)
-    }
-  }
-
-  async function verifyCode(codeValue: string) {
-    if (!verifyToken || codeValue.length !== 6 || pending) return
-    setCodeErr('')
-    setPending(true)
-    try {
-      await api.post('/auth/verify-email', { challengeToken: verifyToken, code: codeValue })
-      setMe(await api.get('/auth/me'))
-      setVerifyToken(null)
-      setStep(2)
-    } catch (e) {
-      const code = errorCode(e)
-      if (code === 'challenge_expired') setCodeErr('That code expired. Request a new one below.')
-      else if (code === 'challenge_locked') setCodeErr('Too many wrong tries. Request a new code to try again.')
-      else setCodeErr(e instanceof Error ? e.message : 'Wrong code. Check the email and try again.')
-    } finally {
-      setPending(false)
-    }
-  }
-
-  async function resendCode() {
-    if (!verifyToken || pending) return
-    setPending(true)
-    try {
-      const res = await api.post('/auth/2fa/resend', { challengeToken: verifyToken })
-      setVerifyToken(res.challengeToken)
-      setCode('')
-      setCodeErr('')
-      setResent(true)
-    } catch {
-      setCodeErr('That attempt expired. Go back and create the account again.')
+      const bootstrap = await api.post('/auth/bootstrap', JSON.parse(sessionStorage.getItem('ecobills_pending_bootstrap') || '{}'))
+      sessionStorage.removeItem('ecobills_pending_bootstrap')
+      setMe(bootstrap)
+      if (bootstrap.user?.role === 'owner') setStep(2)
+      else nav('/')
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : 'Could not create account.')
     } finally {
       setPending(false)
     }
@@ -547,11 +174,7 @@ export function Start() {
     try {
       if (!skipItems) {
         for (const it of items.filter((i) => i.name && i.sku)) {
-          await api.post('/items', {
-            name: it.name,
-            sku: it.sku,
-            salePrice: Math.round(Number(it.salePrice || 0) * 100),
-          }).catch(() => {})
+          await api.post('/items', { name: it.name, sku: it.sku, salePrice: Math.round(Number(it.salePrice || 0) * 100) }).catch(() => {})
         }
       }
       nav('/')
@@ -565,219 +188,71 @@ export function Start() {
   return (
     <AuthShell wide>
       <BrandMark subtitle={`Set up your shop · step ${step + 1} of ${STEPS.length}`} />
-
-      {/* A three-step progress rail. One shared motion element slides between
-          steps, and it is purely opacity/colour under reduced motion. */}
-      <ol className="mb-5 flex gap-2" aria-label="Setup progress">
-        {STEPS.map((label, i) => (
-          <li key={label} className="flex-1">
-            <span
-              className={cn(
-                'block h-1 rounded-[var(--radius-chip)] transition-colors duration-[var(--dur-fast)] ease-[var(--ease-standard)]',
-                i <= step ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-neutral-tint)]',
-              )}
-            />
-            <span className={cn('mt-1.5 block text-xs', i === step ? 'font-medium text-[var(--color-ink)]' : 'text-[var(--color-ink-subtle)]')}>
-              {label}
-            </span>
-          </li>
-        ))}
-      </ol>
-
-      {/* Enter-only cross-fade, same tokens as a page transition — never
-          mode="wait", which would add dead time between steps. */}
-      <motion.div
-        key={step}
-        initial={stepTransition.initial as never}
-        animate={stepTransition.animate as never}
-        transition={stepTransition.transition as never}
-      >
-        {step === 0 ? (
-          <div className="flex flex-col gap-4">
-            <TextField
-              label="Business name"
-              required
-              value={f.businessName}
-              onValueChange={(v) => setF({ ...f, businessName: v })}
-              validate={(v) => (v.trim() ? undefined : 'This appears at the top of every invoice.')}
-            />
-            <ComboboxField
-              label="State"
-              required
-              hint="Decides CGST+SGST vs IGST on every bill. Type to filter the list."
-              options={INDIAN_STATES}
-              value={f.state}
-              onValueChange={(v) => setF({ ...f, state: v })}
-              validate={(v) => (v.trim() ? undefined : 'Enter your state, for example Maharashtra.')}
-            />
-            <TextField label="GSTIN" hint="Optional. Leave blank if you do not bill GST." value={f.gstin} onValueChange={(v) => setF({ ...f, gstin: v })} />
-            <Button disabled={!f.businessName || !f.state} onClick={() => setStep(1)}>
-              Continue
-            </Button>
-          </div>
-        ) : null}
-
-        {step === 1 && !verifyToken ? (
-          <div className="flex flex-col gap-4">
-            <TextField label="Your name" required value={f.ownerName} onValueChange={(v) => setF({ ...f, ownerName: v })} validate={(v) => (v.trim() ? undefined : 'Enter your name.')} />
-            <TextField
-              label="Email"
-              required
-              inputProps={{ type: 'email', autoComplete: 'username' }}
-              value={f.email}
-              onValueChange={(v) => setF({ ...f, email: v })}
-              validate={(v) => (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ? undefined : 'Enter a valid email address.')}
-            />
-            <TextField
-              label="Password"
-              required
-              hint="8 characters or more."
-              inputProps={{ type: 'password', autoComplete: 'new-password' }}
-              value={f.password}
-              onValueChange={(v) => setF({ ...f, password: v })}
-              validate={(v) => (v.length >= 8 ? undefined : 'Use at least 8 characters.')}
-            />
-            <FormError message={err} />
-            <FormError message={err} />
-            <div className="flex gap-2">
-              <Button variant="ghost" onClick={() => setStep(0)}>
-                Back
-              </Button>
-              <Button
-                className="flex-1"
-                loading={pending}
-                loadingLabel="Creating account"
-                disabled={!f.ownerName || !f.email || f.password.length < 8}
-                onClick={signup}
-              >
-                Continue
-              </Button>
+      {verificationNeeded ? (
+        <div className="flex flex-col gap-4">
+          <p className="text-sm text-[var(--color-ink-muted)]">Check your email to verify the Neon Auth account, then return here and log in. Your business setup is saved for the next authenticated request.</p>
+          <Button onClick={() => nav('/login')}>Continue to log in</Button>
+        </div>
+      ) : (
+        <>
+          <ol className="mb-5 flex gap-2" aria-label="Setup progress">
+            {STEPS.map((label, i) => <li key={label} className="flex-1"><span className={cn('block h-1 rounded-[var(--radius-chip)]', i <= step ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-neutral-tint)]')} /><span className="mt-1.5 block text-xs text-[var(--color-ink-subtle)]">{label}</span></li>)}
+          </ol>
+          {step === 0 ? (
+            <div className="flex flex-col gap-4">
+              <TextField label="Business name" required value={f.businessName} onValueChange={(v) => setF({ ...f, businessName: v })} />
+              <ComboboxField label="State" required options={INDIAN_STATES} value={f.state} onValueChange={(v) => setF({ ...f, state: v })} />
+              <TextField label="GSTIN" hint="Optional." value={f.gstin} onValueChange={(v) => setF({ ...f, gstin: v })} />
+              <Button disabled={!f.businessName || !f.state} onClick={() => setStep(1)}>Continue</Button>
             </div>
-          </div>
-        ) : null}
-
-        {verifyToken ? (
-          <div className="flex flex-col gap-4">
-            <p className="text-sm text-[var(--color-ink-muted)]">
-              Almost done — enter the 6-digit code sent to <b>{f.email}</b> to prove this inbox is yours.
-            </p>
-            <TextField
-              label="6-digit code"
-              inputProps={{ inputMode: 'numeric', autoComplete: 'one-time-code', maxLength: 6, autoFocus: true, placeholder: '••••••' }}
-              value={code}
-              onValueChange={(v) => {
-                const digits = v.replace(/\D/g, '').slice(0, 6)
-                setCode(digits)
-                if (digits.length === 6) void verifyCode(digits)
-              }}
-              validate={(v) => (v.length === 6 ? undefined : 'Enter all 6 digits.')}
-            />
-            <FormError message={codeErr} />
-            <Button loading={pending} loadingLabel="Verifying" disabled={code.length !== 6} onClick={() => verifyCode(code)}>
-              Verify email
-            </Button>
-            <div className="flex items-center justify-between text-sm">
-              <button
-                type="button"
-                className={`rounded-[var(--radius-sm)] font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
-                onClick={resendCode}
-              >
-                Send a new code
-              </button>
-              <button
-                type="button"
-                className={`rounded-[var(--radius-sm)] text-[var(--color-ink-muted)] underline underline-offset-2 hover:no-underline ${focusRing}`}
-                onClick={() => {
-                  setVerifyToken(null)
-                  setCode('')
-                  setCodeErr('')
-                }}
-              >
-                Change details
-              </button>
+          ) : null}
+          {step === 1 ? (
+            <div className="flex flex-col gap-4">
+              <TextField label="Owner name" required value={f.ownerName} onValueChange={(v) => setF({ ...f, ownerName: v })} />
+              <TextField label="Email" required inputProps={{ type: 'email', autoComplete: 'username' }} value={f.email} onValueChange={(v) => setF({ ...f, email: v })} />
+              <TextField label="Password" required hint="8 characters or more." inputProps={{ type: 'password', autoComplete: 'new-password' }} value={f.password} onValueChange={(v) => setF({ ...f, password: v })} />
+              <FormError message={err} />
+              <Button loading={pending} loadingLabel="Creating account" disabled={!f.ownerName || !f.email || f.password.length < 8} onClick={() => void signup()}>Create account</Button>
+              <button type="button" className={`text-sm text-[var(--color-ink-muted)] underline ${focusRing}`} onClick={() => setStep(0)}>Back</button>
             </div>
-            {resent ? <p className="text-sm text-[var(--color-ink-muted)]">A new code is on its way.</p> : null}
-          </div>
-        ) : null}
-
-        {step === 2 ? (
-          <div className="flex flex-col gap-4">
-            <p className="text-sm text-[var(--color-ink-muted)]">Add your first items, or skip and do it later.</p>
-
-            <ul className="flex flex-col gap-3">
-              {items.map((it, i) => (
-                <li key={i} className="grid grid-cols-[1fr_5rem_5rem_auto] items-end gap-2">
-                  <div>
-                    <label htmlFor={`item-name-${i}`} className="mb-1 block text-xs font-medium uppercase tracking-wide text-[var(--color-ink-muted)]">
-                      Item name
-                    </label>
-                    <input
-                      id={`item-name-${i}`}
-                      placeholder="Item name"
-                      className={`w-full rounded-[var(--radius-control)] border border-[var(--color-border-input)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-ink)] placeholder:text-[var(--color-ink-subtle)] ${focusRing}`}
-                      value={it.name}
-                      onChange={(e) => setItems(items.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor={`item-sku-${i}`} className="mb-1 block text-xs font-medium uppercase tracking-wide text-[var(--color-ink-muted)]">
-                      SKU
-                    </label>
-                    <input
-                      id={`item-sku-${i}`}
-                      placeholder="SKU"
-                      className={`w-full rounded-[var(--radius-control)] border border-[var(--color-border-input)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-ink)] placeholder:text-[var(--color-ink-subtle)] ${focusRing}`}
-                      value={it.sku}
-                      onChange={(e) => setItems(items.map((x, j) => (j === i ? { ...x, sku: e.target.value } : x)))}
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor={`item-price-${i}`} className="mb-1 block text-xs font-medium uppercase tracking-wide text-[var(--color-ink-muted)]">
-                      Price ₹
-                    </label>
-                    <input
-                      id={`item-price-${i}`}
-                      inputMode="decimal"
-                      placeholder="0"
-                      className={`tnum w-full rounded-[var(--radius-control)] border border-[var(--color-border-input)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-ink)] placeholder:text-[var(--color-ink-subtle)] ${focusRing}`}
-                      value={it.salePrice}
-                      onChange={(e) => setItems(items.map((x, j) => (j === i ? { ...x, salePrice: e.target.value } : x)))}
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    aria-label={`Remove item row ${i + 1}`}
-                    className={`mb-0.5 rounded-[var(--radius-control)] p-2 text-[var(--color-ink-muted)] transition-colors duration-[var(--dur-fast)] hover:bg-[var(--color-neutral-tint)] hover:text-[var(--color-danger-text)] ${focusRing}`}
-                    onClick={() => setItems(items.length > 1 ? items.filter((_, j) => j !== i) : items)}
-                    disabled={items.length === 1}
-                  >
-                    <IconClose className="text-sm" />
-                  </button>
-                </li>
-              ))}
-            </ul>
-
-            <Button variant="ghost" size="sm" className="self-start" onClick={() => setItems([...items, { name: '', sku: '', salePrice: '' }])}>
-              <IconPlus className="text-base" />
-              Add another
-            </Button>
-
-            <FormError message={err} />
-
-            <div className="flex gap-2">
-              <Button variant="ghost" onClick={() => setStep(1)} disabled={pending}>
-                Back
-              </Button>
-              <Button className="flex-1" loading={pending} loadingLabel="Creating your shop" onClick={() => finish(false)}>
-                Finish
-              </Button>
-              <Button variant="secondary" onClick={() => finish(true)} disabled={pending}>
-                Skip
-              </Button>
+          ) : null}
+          {step === 2 ? (
+            <div className="flex flex-col gap-4">
+              <p className="text-sm text-[var(--color-ink-muted)]">Add a few inventory items now, or skip and do it later.</p>
+              {items.map((it, i) => <div className="grid grid-cols-3 gap-2" key={i}><TextField label="Item" value={it.name} onValueChange={(v) => setItems(items.map((x, n) => n === i ? { ...x, name: v } : x))} /><TextField label="SKU" value={it.sku} onValueChange={(v) => setItems(items.map((x, n) => n === i ? { ...x, sku: v } : x))} /><TextField label="Price" inputProps={{ type: 'number' }} value={it.salePrice} onValueChange={(v) => setItems(items.map((x, n) => n === i ? { ...x, salePrice: v } : x))} /></div>)}
+              <button type="button" className={`text-left text-sm text-[var(--color-accent-text)] underline ${focusRing}`} onClick={() => setItems([...items, { name: '', sku: '', salePrice: '' }])}>Add another item</button>
+              <FormError message={err} />
+              <div className="flex gap-2"><Button loading={pending} loadingLabel="Saving" onClick={() => void finish(false)}>Finish setup</Button><Button variant="ghost" onClick={() => void finish(true)}>Skip</Button></div>
             </div>
-          </div>
-        ) : null}
-      </motion.div>
+          ) : null}
+        </>
+      )}
     </AuthShell>
   )
+}
+
+export function ResetPassword() {
+  const [params] = useSearchParams()
+  const [password, setPassword] = useState('')
+  const [err, setErr] = useState('')
+  const [done, setDone] = useState(false)
+  const [pending, setPending] = useState(false)
+  const token = params.get('token') || ''
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    setPending(true)
+    setErr('')
+    try {
+      const result = await authClient.resetPassword({ newPassword: password, token })
+      if (result.error) throw new Error(result.error.message || 'Could not reset the password.')
+      setDone(true)
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : 'Could not reset the password.')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return <AuthShell><BrandMark subtitle="Choose a new password." />{done ? <><p className="text-sm text-[var(--color-ink-muted)]">Password changed. You can now sign in.</p><Link className={`mt-4 inline-block text-sm text-[var(--color-accent-text)] underline ${focusRing}`} to="/login">Back to log in</Link></> : <form className="flex flex-col gap-4" onSubmit={submit}><TextField label="New password" inputProps={{ type: 'password', autoComplete: 'new-password' }} value={password} onValueChange={setPassword} /><FormError message={err} /><Button type="submit" loading={pending} disabled={password.length < 8 || !token}>Set password</Button></form>}</AuthShell>
 }

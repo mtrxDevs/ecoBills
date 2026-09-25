@@ -1,7 +1,6 @@
 import path from 'node:path'
 import { existsSync } from 'node:fs'
 import Fastify, { type FastifyInstance } from 'fastify'
-import cookie from '@fastify/cookie'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import fastifyStatic from '@fastify/static'
@@ -20,12 +19,11 @@ import { opsRoutes } from './routes/ops.js'
 export async function buildApp(opts: { logger?: boolean } = {}): Promise<FastifyInstance> {
   const app = Fastify({ logger: opts.logger ?? false })
 
-  await app.register(cookie)
   const allowedOrigins = [
     ...(process.env.APP_URL?.split(',').map((s) => s.trim()).filter(Boolean) || []),
     // The Tauri desktop shell loads the UI from its own scheme, not https —
-    // allow it explicitly so the packaged app can reach this API with cookies.
-    // (Cookies stay partitioned per app; no website can ride this allowance.)
+    // allow it explicitly so the packaged app can reach this API with bearer
+    // tokens. No API database credentials are exposed to the shell.
     'tauri://localhost',
     'http://tauri.localhost',
     'https://tauri.localhost',

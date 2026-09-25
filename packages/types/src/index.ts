@@ -7,53 +7,20 @@ export const qtyDec = z.coerce.number().positive().max(1_000_000)
 
 export const roleSchema = z.enum(['owner', 'staff'])
 
-export const signupSchema = z.object({
+export const bootstrapSchema = z.object({
   businessName: z.string().min(1).max(120),
   state: z.string().min(1).max(80),
   gstin: z.string().max(15).optional().nullable(),
   ownerName: z.string().min(1).max(120),
-  email: z.string().email(),
-  password: z.string().min(8).max(128),
-})
-
-export const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-})
-
-export const verify2faSchema = z.object({
-  challengeToken: z.string().min(16).max(128),
-  code: z.string().regex(/^\d{6}$/, 'code must be 6 digits'),
-})
-
-export const resend2faSchema = z.object({
-  challengeToken: z.string().min(16).max(128),
-})
-
-export const enable2faSchema = z.object({
-  challengeToken: z.string().min(16).max(128),
-  code: z.string().regex(/^\d{6}$/, 'code must be 6 digits'),
-})
-
-export const disable2faSchema = z.object({
-  password: z.string().min(1),
-})
-
-export const forgotPasswordSchema = z.object({
-  email: z.string().email(),
-})
-
-export const resetPasswordSchema = z.object({
-  challengeToken: z.string().min(16).max(128),
-  code: z.string().regex(/^\d{6}$/, 'code must be 6 digits'),
-  newPassword: z.string().min(8).max(128),
 })
 
 export const createUserSchema = z.object({
   name: z.string().min(1).max(120),
   email: z.string().email(),
-  password: z.string().min(8).max(128),
-  role: roleSchema,
+  // Managed Neon Auth owns passwords. This is optional for compatibility with
+  // older clients, but the API never stores or uses it.
+  password: z.string().min(8).max(128).optional(),
+  role: roleSchema.optional(),
 })
 
 export const customerSchema = z.object({
@@ -175,5 +142,4 @@ export const businessPatchSchema = z.object({
   poFollowupDays: z.number().int().min(1).max(60).optional(),
 })
 
-export type SignupInput = z.infer<typeof signupSchema>
 export type CreateInvoiceInput = z.infer<typeof createInvoiceSchema>

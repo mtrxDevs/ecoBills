@@ -19,7 +19,7 @@ prisma/         Schema + migrations. PostgreSQL only.
 
 ```
 Browser → Vite proxy (/api/*, dev) or same-origin (SERVE_WEB=1, prod)
-  → Fastify (cookie → requireAuth → requirePerm(action) → Zod parse → Prisma txn)
+  → Fastify (Neon bearer JWT → requireAuth → requirePerm(action) → Zod parse → Prisma txn)
   → Postgres (Supabase session pooler :5432 in prod)
 ```
 
@@ -30,7 +30,7 @@ invoice-draft fallback only inside that local app. Both surfaces use the API for
 authentication and connected sync; the client never connects to Supabase directly.
 
 - **Routes are `/api`-prefixed plugins** (`services/api/src/index.ts` → `app.ts` factory).
-- **AuthN:** scrypt password → 30-day session row → httpOnly cookie (`lax` local, `None+Secure` cross-origin via `SESSION_COOKIE_SAMESITE`). 2FA/email-verify challenges are hashed, single-use, 10-min, 5-attempt.
+- **AuthN:** Managed Neon Auth owns email/password, verification, recovery, sessions, and JWTs. The API verifies bearer tokens against `NEON_AUTH_JWKS_URL` with `NEON_AUTH_BASE_URL` as issuer, then maps `sub` to `User.neonAuthId`. Legacy password/session/challenge columns and tables remain retained, but are no longer used.
 - **AuthZ:** `requirePerm(action)` on every sensitive route; the §6.1 Owner/Staff matrix lives in `auth.ts`. The client hiding a button is UX, not security.
 - **Validation:** Zod in `packages/types`, parsed server-side; the API returns `{ error: <code> }`, the web maps codes via `ApiError`.
 - **Errors:** 4xx carry stable machine codes; 500s never leak internals.
@@ -47,7 +47,7 @@ authentication and connected sync; the client never connects to Supabase directl
 | History is snapshotted | Invoice/credit lines carry `unit_price/cost_snapshot` + tax bps; price changes never rewrite the past. |
 | Numbering is atomic | `InvoiceCounter(business, FY)` + `INSERT..ON CONFLICT DO NOTHING` + `UPDATE..RETURNING` in one txn. (An earlier upsert-based version raced under concurrency — caught by the integration suite.) |
 | Tenancy | Every tenant table carries `business_id`; every query filters on it. RLS is deny-by-default defense-in-depth; enforcement is the API. |
-| Audit | Price changes, stock adjustments, voids, credit notes, sends, 2FA lockouts → `AuditLog` with before/after. |
+| Audit | Bootstrap/user changes, price changes, stock adjustments, voids, credit notes, sends → `AuditLog` with before/after. |
 
 ## Money flows
 
@@ -58,7 +58,7 @@ authentication and connected sync; the client never connects to Supabase directl
 
 ## Email
 
-`sendEmail()` in `services/api/src/email.ts` (Resend, `Idempotency-Key` where it matters). Unconfigured or `RESEND_STUB=1` → logged stub, never throws. Sender is `RESEND_FROM` (must be a verified domain for real delivery). 2FA/verify mails are branded HTML + text fallback.
+`sendEmail()` in `services/api/src/email.ts` remains for supplier workflow mail. Neon Managed Auth owns verification and recovery email delivery; no application 2FA mailer is used.
 
 ## Environments
 
@@ -66,7 +66,8 @@ authentication and connected sync; the client never connects to Supabase directl
 |---|---|---|
 | `DATABASE_URL` / `DIRECT_URL` | Supabase session pooler `:5432` | same, from service env |
 | `SERVE_WEB` | `0` (Vite serves UI) | `1` (API serves `apps/web/dist`) |
-| `SESSION_COOKIE_SAMESITE` | `lax` | `none` (cross-origin desktop/split) |
+| `NEON_AUTH_BASE_URL` / `NEON_AUTH_JWKS_URL` | Neon branch Auth URL/JWKS | injected/configured by Neon |
+| `VITE_NEON_AUTH_URL` | same Neon branch Auth URL | baked into web and Tauri builds |
 | `VITE_API_URL` | empty (same-origin) | API origin, baked at web build time |
 | `VITE_DESKTOP_BUILD` | unset (web online-only) | `true` only for the Windows Tauri bundle |
 | `RESEND_*` | stub unless key set | real key + verified sender |

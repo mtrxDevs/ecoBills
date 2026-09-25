@@ -21,7 +21,7 @@ import { useMe } from '../lib/store'
 /**
  * Settings. Endpoints, payloads and the owner gate are unchanged:
  *   GET   /business        PATCH /business
- *   GET   /users           POST  /users  { name, email, password, role: 'staff' }
+ *   GET   /users           POST  /users  { name, email }
  *
  * Presentation changes: the labels/hints/errors are wired through <Field>
  * (label above, helper and error below, aria-describedby + role="alert"), the
@@ -41,7 +41,7 @@ export function Settings() {
   })
   const { data: users } = useQuery({ queryKey: ['users'], queryFn: () => api.get('/users').catch(() => null) })
   const [f, setF] = useState<any>(null)
-  const [staff, setStaff] = useState({ name: '', email: '', password: '' })
+  const [staff, setStaff] = useState({ name: '', email: '' })
 
   const save = useMutation({
     mutationFn: (b: any) => api.patch('/business', b),
@@ -55,8 +55,8 @@ export function Settings() {
     mutationFn: (b: any) => api.post('/users', { ...b, role: 'staff' }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['users'] })
-      setStaff({ name: '', email: '', password: '' })
-      toast.success('Staff account added', 'They can sign in with the email and password you set.')
+      setStaff({ name: '', email: '' })
+      toast.success('Staff invite prepared', 'They must sign up with this email through Neon Auth before they can access the business.')
     },
     onError: (e: any) => toast.error('Could not add this staff member', e instanceof Error ? e.message : undefined),
   })
@@ -173,8 +173,6 @@ export function Settings() {
         ) : null}
       </Card>
 
-      <TwoFactorSection />
-
       {isOwner ? (
         <section className="mt-6">
           <h2 className="mb-2 font-display text-lg font-semibold text-[var(--color-ink)]">Team</h2>
@@ -223,21 +221,13 @@ export function Settings() {
                 onValueChange={(v) => setStaff({ ...staff, email: v })}
                 validate={(v) => (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) ? undefined : 'Enter a valid email address.')}
               />
-              <TextField
-                label="Password"
-                hint="8 characters or more."
-                inputProps={{ type: 'password', autoComplete: 'new-password' }}
-                value={staff.password}
-                onValueChange={(v) => setStaff({ ...staff, password: v })}
-                validate={(v) => (v.length >= 8 ? undefined : 'Use at least 8 characters.')}
-              />
             </div>
             <div className="mt-4">
               <Button
                 variant="secondary"
                 loading={addStaff.isPending}
                 loadingLabel="Adding staff account"
-                disabled={!staff.name || !staff.email || staff.password.length < 8}
+                disabled={!staff.name || !staff.email}
                 onClick={() => addStaff.mutate(staff)}
               >
                 Add staff
@@ -247,128 +237,5 @@ export function Settings() {
         </section>
       ) : null}
     </div>
-  )
-}
-
-/**
- * Two-step verification for your own sign-in. Role-independent: owners and
- * staff alike protect their own account; nobody can toggle anyone else's.
- */
-function TwoFactorSection() {
-  const { me, setMe } = useMe()
-  const toast = useToast()
-  const [token, setToken] = useState<string | null>(null)
-  const [code, setCode] = useState('')
-  const [password, setPassword] = useState('')
-  const [pending, setPending] = useState(false)
-  const enabled = !!me?.user?.twoFactorEnabled
-
-  async function refresh() {
-    setMe(await api.get('/auth/me'))
-  }
-
-  async function setup() {
-    setPending(true)
-    try {
-      const res = await api.post('/auth/2fa/setup')
-      setToken(res.challengeToken)
-      setCode('')
-    } catch {
-      toast.error('Could not start setup', 'Check the connection and try again.')
-    } finally {
-      setPending(false)
-    }
-  }
-
-  async function enable() {
-    if (!token || code.length !== 6) return
-    setPending(true)
-    try {
-      await api.post('/auth/2fa/enable', { challengeToken: token, code })
-      setToken(null)
-      setCode('')
-      await refresh()
-      toast.success('Two-step verification is on', 'Your next sign-in will ask for an emailed code.')
-    } catch {
-      toast.error('Wrong code', 'Check the email and try again.')
-    } finally {
-      setPending(false)
-    }
-  }
-
-  async function disable() {
-    if (!password) return
-    setPending(true)
-    try {
-      await api.post('/auth/2fa/disable', { password })
-      setPassword('')
-      await refresh()
-      toast.success('Two-step verification is off')
-    } catch {
-      toast.error('Wrong password', 'Disabling needs your current password.')
-    } finally {
-      setPending(false)
-    }
-  }
-
-  return (
-    <section className="mt-6">
-      <h2 className="mb-2 font-display text-lg font-semibold text-[var(--color-ink)]">Two-step verification</h2>
-      <Card>
-        <div className="flex flex-wrap items-center gap-3">
-          <Badge tone={enabled ? 'ok' : 'muted'}>{enabled ? 'On' : 'Off'}</Badge>
-          <p className="min-w-0 flex-1 text-sm text-[var(--color-ink-muted)]">
-            {enabled
-              ? 'Every sign-in to this account asks for a 6-digit code sent to your email.'
-              : 'Add a 6-digit emailed code on top of your password.'}
-          </p>
-        </div>
-
-        {!enabled && !token ? (
-          <div className="mt-4">
-            <Button loading={pending} loadingLabel="Sending code" onClick={setup}>
-              Enable — send me a code
-            </Button>
-          </div>
-        ) : null}
-
-        {!enabled && token ? (
-          <div className="mt-4 flex max-w-sm flex-col gap-3">
-            <p className="text-sm text-[var(--color-ink-muted)]">
-              Enter the 6-digit code sent to <b>{me?.user?.email}</b>.
-            </p>
-            <TextField
-              label="6-digit code"
-              inputProps={{ inputMode: 'numeric', maxLength: 6, autoFocus: true, placeholder: '••••••' }}
-              value={code}
-              onValueChange={(v) => setCode(v.replace(/\D/g, '').slice(0, 6))}
-              validate={(v) => (v.length === 6 ? undefined : 'Enter all 6 digits.')}
-            />
-            <div>
-              <Button loading={pending} loadingLabel="Confirming" disabled={code.length !== 6} onClick={enable}>
-                Confirm & turn on
-              </Button>
-            </div>
-          </div>
-        ) : null}
-
-        {enabled ? (
-          <div className="mt-4 flex max-w-sm flex-col gap-3">
-            <TextField
-              label="Current password"
-              hint="Turning it off needs your password, so a stolen session alone can't do it."
-              inputProps={{ type: 'password', autoComplete: 'current-password' }}
-              value={password}
-              onValueChange={setPassword}
-            />
-            <div>
-              <Button variant="danger" loading={pending} loadingLabel="Turning off" disabled={!password} onClick={disable}>
-                Turn off
-              </Button>
-            </div>
-          </div>
-        ) : null}
-      </Card>
-    </section>
   )
 }

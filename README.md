@@ -54,10 +54,12 @@ Puppeteer PDF step) hosts everything:
   Root `pnpm build` regenerates the Prisma Client first, so the API always
   compiles against fresh types.)
 - Start command: `pnpm --filter @ecobills/api start`
-- Env: `DATABASE_URL`, `DIRECT_URL`, `SESSION_SECRET`, `SERVE_WEB=1`,
+  Env: `DATABASE_URL`, `DIRECT_URL`, `NEON_AUTH_BASE_URL`, `NEON_AUTH_JWKS_URL`,
+  `VITE_NEON_AUTH_URL`, `SERVE_WEB=1`,
   `NODE_ENV=production`, `APP_URL=https://<your-service>`, `RESEND_*`.
-  Use `SESSION_COOKIE_SAMESITE=none` only if a frontend on another origin
-  (Tauri app, split hosting) must log in — same-origin needs nothing.
+  Set `VITE_NEON_AUTH_URL` to the same Neon branch Auth URL for hosted web and
+  desktop builds. The API verifies the injected/configured JWKS and never
+  accepts business or role claims from the client.
 - PDF export falls back to printable HTML wherever Chromium is absent; for real
   PDFs, deploy where headless Chromium runs (or add it to the image).
 

@@ -18,7 +18,7 @@ import {
   useReducedMotion,
   type IconProps,
 } from '@ecobills/ui'
-import { api } from '../lib/api'
+import { authClient } from '../lib/auth'
 import { useMe } from '../lib/store'
 
 const DASHBOARD_ONLY = (import.meta as any).env?.VITE_DASHBOARD_ONLY === 'true'
@@ -140,7 +140,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
             size="sm"
             className="justify-start md:w-full"
             onClick={async () => {
-              await api.post('/auth/logout')
+              await authClient.signOut()
               setMe(null)
               nav('/login')
             }}

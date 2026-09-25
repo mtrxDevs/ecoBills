@@ -21,7 +21,7 @@ import {
   motionLimits,
   useToast,
 } from '@ecobills/ui'
-import { api, apiUrl, money } from '../lib/api'
+import { api, downloadFile, money } from '../lib/api'
 import { useMe } from '../lib/store'
 import { RecordPaymentDialog, ageLabel } from '../components/RecordPayment'
 import { useNet } from '../lib/offline/net'
@@ -334,15 +334,14 @@ export function Billing() {
                   Bill <span className="tnum">{done.invoiceNumber}</span> created.
                 </p>
                 <div className="mt-2 flex flex-wrap gap-3">
-                  <a
+                  <button
+                    type="button"
                     className={`inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] text-sm font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
-                    href={apiUrl(`/invoices/${done.id}/pdf`)}
-                    target="_blank"
-                    rel="noreferrer"
+                    onClick={() => void downloadFile(`/invoices/${done.id}/pdf`, `${done.invoiceNumber}.pdf`).catch(() => toast.error('Could not download the PDF'))}
                   >
                     <IconDownload className="text-base" />
                     Download PDF
-                  </a>
+                  </button>
                   <button
                     type="button"
                     className={`inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] text-sm font-medium text-[var(--color-accent-text)] underline underline-offset-2 hover:no-underline ${focusRing}`}
@@ -470,4 +469,3 @@ export function Billing() {
     </div>
   )
 }
-

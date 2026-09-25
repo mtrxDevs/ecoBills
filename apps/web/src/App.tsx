@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MotionConfig } from 'framer-motion'
 import { AmbientField, Skeleton, ToastProvider } from '@ecobills/ui'
 import { Layout } from './components/Layout'
-import { Login, Start } from './screens/Auth'
+import { Login, ResetPassword, Start } from './screens/Auth'
 import { Dashboard } from './screens/Dashboard'
 import { Inventory } from './screens/Inventory'
 import { Billing } from './screens/Billing'
@@ -101,6 +101,7 @@ export function App() {
                 <Routes>
                   <Route path="/login" element={<Login />} />
                   <Route path="/start" element={<Start />} />
+                  <Route path="/reset-password" element={<ResetPassword />} />
                   {DASHBOARD_ONLY ? (
                     <>
                       {/* Mobile dashboard build: invoice creation routes NOT shipped (§8 DoD) */}

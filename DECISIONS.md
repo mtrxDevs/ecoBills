@@ -2,6 +2,20 @@
 
 Log genuine ambiguities here instead of blocking. Newest first.
 
+## 2026-09-25 — Managed Neon Auth migration
+- Managed Neon Auth (`@neondatabase/auth`) is now the sole sign-in/session
+  provider. The Vite/Tauri clients use `VITE_NEON_AUTH_URL`, obtain short-lived
+  bearer JWTs with `token()`, and attach them to every API request.
+- Fastify verifies those JWTs against `NEON_AUTH_JWKS_URL` with
+  `NEON_AUTH_BASE_URL` as issuer. `User.neonAuthId` is the unique mapping key;
+  Owner/Staff role and business tenancy remain application-database values.
+- `/api/auth/bootstrap` is the only first-signup application provisioning path.
+  It never accepts a client role or business ID. Owner-created staff records
+  are pending until that email signs up through Neon Auth and is linked.
+- Managed Auth does not expose MFA, so the old 2FA UI and API flow are gone.
+  Existing password/session/challenge columns and tables are retained
+  non-destructively for clean-slate rollback/data retention, but are unused.
+
 ## 2026-09-24 — Offline fallback is desktop-only (agent)
 - The hosted web app remains a normal online product: it does not start the connectivity monitor, read/write the IndexedDB cache, show the offline banner, or queue invoice drafts.
 - The Windows Tauri installer still contains the complete `apps/web` UI locally. Its build and dev wrappers set `VITE_DESKTOP_BUILD=true`; that flag enables the existing snapshot/outbox fallback only in the desktop bundle.

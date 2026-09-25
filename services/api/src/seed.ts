@@ -1,7 +1,6 @@
 // Demo/seed data — reviewer can seed and verify RBAC + P&L by hand (Phase 9 DoD).
 import './env.js'
 import { PrismaClient } from '@prisma/client'
-import { hashPassword } from './auth.js'
 
 const prisma = new PrismaClient()
 
@@ -12,10 +11,10 @@ async function main() {
     data: { name: 'Demo Kirana Store', state: 'Maharashtra', gstin: '27ABCDE1234F1Z5', address: 'MG Road, Pune', invoicePrefix: 'INV' },
   })
   const owner = await prisma.user.create({
-    data: { businessId: biz.id, name: 'Demo Owner', email, passwordHash: await hashPassword('password123'), role: 'owner', emailVerified: true },
+    data: { businessId: biz.id, name: 'Demo Owner', email, passwordHash: '', role: 'owner', emailVerified: true },
   })
   await prisma.user.create({
-    data: { businessId: biz.id, name: 'Demo Staff', email: 'staff@demo.shop', passwordHash: await hashPassword('password123'), role: 'staff', emailVerified: true },
+    data: { businessId: biz.id, name: 'Demo Staff', email: 'staff@demo.shop', passwordHash: '', role: 'staff', emailVerified: true },
   })
   const sup = await prisma.supplier.create({ data: { businessId: biz.id, name: 'Sharma Distributors', contactEmail: 'orders@sharma.example', phone: '98200 12345' } })
   const cust = await prisma.customer.create({ data: { businessId: biz.id, name: 'Walk-in Regular', phone: '98200 00000', state: 'Maharashtra' } })
@@ -31,7 +30,7 @@ async function main() {
   }
   // one expense
   await prisma.expense.create({ data: { businessId: biz.id, category: 'Rent', amount: 1500000, note: 'September rent' } })
-  console.log(`seeded business=${biz.id} owner=${email}/password123 staff=staff@demo.shop/password123 customer=${cust.id}`)
+  console.log(`seeded business=${biz.id} owner=${email} staff=staff@demo.shop customer=${cust.id}; link both through Managed Neon Auth`)
 }
 
 main().finally(() => prisma.$disconnect())

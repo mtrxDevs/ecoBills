@@ -14,6 +14,7 @@
   "dependencies": {
     "@ecobills/config": "workspace:*",
     "@ecobills/ui": "workspace:*",
+    "@neondatabase/auth": "0.5.0-beta",
     "@tanstack/react-query": "^5.51.1",
     "framer-motion": "^11.3.19",
     "idb": "^8.0.3",

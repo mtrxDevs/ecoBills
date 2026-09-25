@@ -1,14 +1,25 @@
+import { authClient } from './auth'
+
 // API origin. Empty = same-origin (/api/*), which covers local dev (Vite
-// proxy) and single-service deploys (API serves the web UI itself). Set
-// VITE_API_URL at web build time for split hosting or the desktop app, e.g.
-// VITE_API_URL=https://your-api.onrender.com (needs SESSION_COOKIE_SAMESITE=none
-// on the API for the login cookie to stick cross-origin).
+// proxy) and single-service deploys (API serves the web UI itself).
 const ORIGIN = ((import.meta as any).env?.VITE_API_URL || '') as string
 const BASE = `${ORIGIN}/api`
 
 /** Absolute API URL for non-fetch uses (PDF download links, etc.). */
 export function apiUrl(path: string) {
   return `${BASE}${path}`
+}
+
+export async function downloadFile(path: string, filename: string) {
+  const token = (await authClient.token()).data?.token
+  const res = await fetch(apiUrl(path), { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+  if (!res.ok) throw new ApiError(res.status, 'download_failed')
+  const objectUrl = URL.createObjectURL(await res.blob())
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = filename
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
 }
 
 /** Thrown for every non-2xx response. `code` is the server's error key. */
@@ -23,7 +34,7 @@ export class ApiError extends Error {
   }
 }
 
-/** Server error key for branching (login challenge states, etc.). */
+/** Server error key for branching and friendly error messages. */
 export function errorCode(e: unknown): string {
   return e instanceof ApiError ? e.code : ''
 }
@@ -31,10 +42,6 @@ export function errorCode(e: unknown): string {
 const FRIENDLY: Record<string, string> = {
   invalid_credentials: 'Invalid email or password.',
   email_taken: 'That email is already registered.',
-  invalid_code: 'Wrong code. Check the email and try again.',
-  challenge_expired: 'That code expired. Request a new one.',
-  challenge_locked: 'Too many wrong tries. Request a new code to try again.',
-  invalid_challenge: 'That attempt expired. Start again.',
   overpayment: 'That payment is more than the balance due.',
   paid_invoice_cannot_void: 'That invoice already has payments — issue a credit note instead.',
   supplier_email_missing: 'Add an email address for this supplier first.',
@@ -42,6 +49,7 @@ const FRIENDLY: Record<string, string> = {
   not_found: 'That record no longer exists.',
   forbidden: 'Your role cannot do that.',
   unauthorized: 'Your session expired. Log in again.',
+  profile_setup_required: 'Finish setting up your business before opening the dashboard.',
   database_unavailable: 'Cannot reach the database. Is the API running?',
   validation: 'Some fields need attention.',
   insufficient_stock: 'Not enough stock for that sale.',
@@ -58,12 +66,17 @@ const FRIENDLY: Record<string, string> = {
 
 async function req(path: string, opts: RequestInit = {}) {
   const hasBody = opts.body !== undefined
+  const tokenResult = await authClient.token()
+  const token = tokenResult.data?.token
   const res = await fetch(BASE + path, {
-    credentials: 'include',
     ...opts,
     // Never send Content-Type without a body: Fastify rejects a bodiless
-    // POST as "Body cannot be empty" (this broke logout and order drafts).
-    headers: { ...(hasBody ? { 'Content-Type': 'application/json' } : {}), ...(opts.headers || {}) },
+    // POST as "Body cannot be empty".
+    headers: {
+      ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(opts.headers || {}),
+    },
   })
   if (res.status === 401 && path === '/auth/me') {
     // The session probe: an expired session returns to the login screen.

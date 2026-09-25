@@ -71,6 +71,7 @@ console.log(`[desktop] Rust toolchain found — running \`tauri build\` (${confP
 // LIVE api, not localhost. Accept either variable name, then forward it as
 // VITE_API_URL so `beforeBuildCommand` picks it up through env inheritance.
 const apiUrl = (process.env.ECOBILLS_API_URL || process.env.VITE_API_URL || '').trim()
+const neonAuthUrl = (process.env.ECOBILLS_NEON_AUTH_URL || process.env.VITE_NEON_AUTH_URL || '').trim()
 const requireRelease = process.env.ECOBILLS_REQUIRE_DESKTOP === '1'
 if (!apiUrl || !/^https:\/\//.test(apiUrl)) {
   if (requireRelease) {
@@ -99,6 +100,7 @@ const build = spawnSync(process.execPath, [tauriCli, 'build'], {
     ...process.env,
     VITE_DESKTOP_BUILD: 'true',
     ...(apiUrl && /^https:\/\//.test(apiUrl) ? { VITE_API_URL: apiUrl } : {}),
+    ...(neonAuthUrl ? { VITE_NEON_AUTH_URL: neonAuthUrl } : {}),
   },
 })
 process.exit(build.status ?? 1)
